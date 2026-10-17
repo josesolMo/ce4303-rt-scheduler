@@ -5,6 +5,18 @@
 
 int main(void) {
     printf("=== CE4303 REAL-TIME SCHEDULER HOST ===\n");
-    // Procesos de drivers y planner con fork()/execvp()
+    
+    // Crear la memoria compartida
+    SharedMemory *shm = ipc_crear();
+
+    printf("Memoria compartida SIUUU\n");
+
+    // Prueba nomás
+    printf("Total eventos: %d\n", shm->tail);
+
+
+    ipc_destroy(shm);
+    printf("RIP Memoria compartida\n");
+
     return 0;
 }
