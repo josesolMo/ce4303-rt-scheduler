@@ -5,6 +5,8 @@
 
 #define SHM_NAME "/ce4303_host"
 #define MAX_EVENTS 100
+#define EVENTO_TICK 1
+#define EVENTO_FIN -1
 
 
 // Informacion de un evento
@@ -35,4 +37,8 @@ SharedMemory *ipc_connect(void);
 void ipc_disconnect(SharedMemory *mem);
 void ipc_destroy(SharedMemory *mem);
 
+
+ // Guardar y sacar un evento en la cola
+ int ipc_send_event(SharedMemory *mem, const Event *event);
+ int ipc_get_event(SharedMemory *mem, Event *event);
 #endif
