@@ -3,7 +3,7 @@
 
 #include <semaphore.h>
 
-#define SHM_NAME "/ce4303_host"
+#define mem_NAME "/ce4303_host"
 #define MAX_EVENTS 100
 #define EVENTO_TICK 1
 #define EVENTO_FIN -1
@@ -30,7 +30,7 @@ typedef struct {
 } SharedMemory;
 
 // Crear la memoria compartida
-SharedMemory *ipc_crear(void);
+SharedMemory *ipc_create(void);
 SharedMemory *ipc_connect(void);
 
 // Liberar la memoria compartida

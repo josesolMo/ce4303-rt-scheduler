@@ -9,10 +9,10 @@
 #include <string.h>
 
 // Crear la memoria compartida
-SharedMemory *ipc_crear(void) {
+SharedMemory *ipc_create(void) {
 
     // Crear el objeto de memoria compartida
-    int shm_fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0600);
+    int shm_fd = shm_open(mem_NAME, O_CREAT | O_EXCL | O_RDWR, 0600);
 
     if (shm_fd == -1) {
         perror("Error en shm_open");
@@ -23,60 +23,60 @@ SharedMemory *ipc_crear(void) {
     if (ftruncate(shm_fd, sizeof(SharedMemory)) == -1) {
         perror("Error en ftruncate");
         close(shm_fd);
-        shm_unlink(SHM_NAME);
+        shm_unlink(mem_NAME);
         return NULL;
     }
 
     // Mapear la memoria para poder utilizarla
-    SharedMemory *shm = mmap(NULL, sizeof(SharedMemory), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    SharedMemory *mem = mmap(NULL, sizeof(SharedMemory), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
 
     close(shm_fd);
 
-    if (shm == MAP_FAILED) {
+    if (mem == MAP_FAILED) {
         perror("Error en mmap");
-        shm_unlink(SHM_NAME);
+        shm_unlink(mem_NAME);
         return NULL;
     }
 
-    shm->head = 0;
-    shm->tail = 0;
+    mem->head = 0;
+    mem->tail = 0;
     
     // Se inicializan los semaforos
-    sem_init(&shm->mutex, 1, 1);
-    sem_init(&shm->free, 1, MAX_EVENTS);
-    sem_init(&shm->available, 1, 0);
+    sem_init(&mem->mutex, 1, 1);
+    sem_init(&mem->free, 1, MAX_EVENTS);
+    sem_init(&mem->available, 1, 0);
 
-    return shm;
+    return mem;
 }
 
 // Esta es para conectarse a la memoria que ya existe
 SharedMemory *ipc_connect(void) {
-     int shm_fd = shm_open(SHM_NAME, O_RDWR, 0600);
+     int shm_fd = shm_open(mem_NAME, O_RDWR, 0600);
 
-     SharedMemory *shm = mmap(NULL, sizeof(SharedMemory), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+     SharedMemory *mem = mmap(NULL, sizeof(SharedMemory), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
 
      close(shm_fd);
 
-     return shm;
+     return mem;
 }
 
 // Desconecta un proceso de la memoria compartida
-void ipc_disconnect(SharedMemory *shm) {
-    if (shm != NULL) {
-        munmap(shm, sizeof(SharedMemory));
+void ipc_disconnect(SharedMemory *mem) {
+    if (mem != NULL) {
+        munmap(mem, sizeof(SharedMemory));
     }
 }
 
 // Liberar los recursos al finalizar
-void ipc_destroy(SharedMemory *shm) {
-    if (shm == NULL) {
+void ipc_destroy(SharedMemory *mem) {
+    if (mem == NULL) {
         return;
     }
-    sem_destroy(&shm->mutex);
-    sem_destroy(&shm->free);
-    sem_destroy(&shm->available);
-    munmap(shm, sizeof(SharedMemory));
-    shm_unlink(SHM_NAME);
+    sem_destroy(&mem->mutex);
+    sem_destroy(&mem->free);
+    sem_destroy(&mem->available);
+    munmap(mem, sizeof(SharedMemory));
+    shm_unlink(mem_NAME);
 }
 
 // Esperar un semáforo
@@ -114,7 +114,7 @@ int ipc_send_event(SharedMemory *mem, const Event *event){
 
     // Desbloquear la cola con el mutex
     sem_post(&mem->mutex);
-    
+
     // Avisar que hay un evento disponible
     sem_post(&mem->available);
 
