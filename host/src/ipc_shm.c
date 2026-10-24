@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <string.h>
 
+
 // Crear la memoria compartida
 SharedMemory *ipc_create(void) {
 
@@ -40,6 +41,10 @@ SharedMemory *ipc_create(void) {
 
     mem->head = 0;
     mem->tail = 0;
+
+    // Inicialmente ningun nodo esta calibrado
+    mem->node_capacity[0] = 0;
+    mem->node_capacity[1] = 0;
     
     // Se inicializan los semaforos
     sem_init(&mem->mutex, 1, 1);
@@ -150,6 +155,50 @@ int ipc_get_event(SharedMemory *mem, Event *event){
 
     // Avisar que quedo un espacio libre
     sem_post(&mem->free);
+
+    return 0;
+}
+
+
+// Guardar capacidad de un nodo
+int ipc_set_capacity(SharedMemory *mem, int node, uint32_t capacity) {
+
+    if (mem == NULL || node < 1 || node > 2 || capacity == 0) {
+        return -1;
+    }
+
+    // Bloquear acceso a memoria
+    if (wait_semaforo(&mem->mutex) == -1) {
+        return -1;
+    }
+
+    mem->node_capacity[node - 1] = capacity;
+
+    // Liberar acceso
+    sem_post(&mem->mutex);
+
+    return 0;
+}
+
+// Obtener capacidad de un nodo
+int ipc_get_capacity(SharedMemory *mem, int node, uint32_t *capacity) {
+
+    if (mem == NULL || node < 1 || node > 2 || capacity == NULL) {
+        return -1;
+    }
+
+    if (wait_semaforo(&mem->mutex) == -1) {
+        return -1;
+    }
+
+    *capacity = mem->node_capacity[node - 1];
+
+    sem_post(&mem->mutex);
+
+    // Si es cero, todavia no se ha calibrado
+    if (*capacity == 0) {
+        return -1;
+    }
 
     return 0;
 }

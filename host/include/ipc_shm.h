@@ -2,6 +2,7 @@
 #define IPC_SHM_H
 
 #include <semaphore.h>
+#include <stdint.h>
 
 #define mem_NAME "/ce4303_host"
 #define MAX_EVENTS 100
@@ -24,6 +25,8 @@ typedef struct {
     int head;           // Indice del primer evento
     int tail;           // Indice del ultimo evento
 
+    uint32_t node_capacity[2]; // Capacidad de cada nodo en UT por tick
+
     sem_t mutex;        // Para controlar el acceso a la memoria
     sem_t free;    // Para notificar al host que hay un evento nuevo
     sem_t available; // Para notificar al host que hay espacio disponible
@@ -41,4 +44,12 @@ void ipc_destroy(SharedMemory *mem);
  // Guardar y sacar un evento en la cola
  int ipc_send_event(SharedMemory *mem, const Event *event);
  int ipc_get_event(SharedMemory *mem, Event *event);
+
+
+// Guardar capacidad medida de un nodo
+int ipc_set_capacity(SharedMemory *mem, int node, uint32_t capacity);
+
+// Leer capacidad de un nodo
+int ipc_get_capacity(SharedMemory *mem, int node, uint32_t *capacity);
+
 #endif

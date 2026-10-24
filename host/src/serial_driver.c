@@ -112,6 +112,7 @@ static int serial_read_bytes(int fd, uint8_t *buffer, size_t quantity, int timeo
     size_t received = 0;
 
     while (received < quantity) {
+        // Esto es la estructura de la biblioteca poll
         struct pollfd pfd;
 
         pfd.fd = fd;
@@ -152,6 +153,9 @@ static int serial_read_bytes(int fd, uint8_t *buffer, size_t quantity, int timeo
             perror("Error al leer serial");
             return SERIAL_ERROR;
         }
+
+        if (n == 0) {return SERIAL_ERROR;}
+
         received += (size_t)n;
     }
 
@@ -160,11 +164,9 @@ static int serial_read_bytes(int fd, uint8_t *buffer, size_t quantity, int timeo
 
 
 // Recibir una trama completa
-int serial_receive(int fd, uint8_t *tipo,
-                   uint8_t *datos, size_t capacidad,
-                   uint8_t *longitud, int timeout_ms) {
+int serial_receive(int fd, uint8_t *type, uint8_t *data, size_t capacity, uint8_t *len, int timeout_ms) {
 
-    if (fd < 0 || tipo == NULL || longitud == NULL) {
+    if (fd < 0 || type == NULL || len == NULL) {
         return SERIAL_ERROR;
     }
 
@@ -173,17 +175,13 @@ int serial_receive(int fd, uint8_t *tipo,
     // Buscar el byte de inicio
     do {
 
-        int resultado = serial_read_bytes(
-            fd, trama, 1, timeout_ms
-        );
+        int resultado = serial_read_bytes(fd, trama, 1, timeout_ms);
 
-        if (resultado != SERIAL_OK) {
-            return resultado;
-        }
+        if (resultado != SERIAL_OK) {return resultado;}
 
     } while (trama[0] != START_BYTE);
 
-    // Leer tipo de mensaje y longitud
+    // Leer tipo de mensaje y longitud que son las siguientes posiciones de trama[1 y 2]
     int resultado = serial_read_bytes(
         fd, trama + 1, 2, timeout_ms
     );
@@ -202,27 +200,22 @@ int serial_receive(int fd, uint8_t *tipo,
     if (resultado != SERIAL_OK) {
         return resultado;
     }
-
-    size_t tam_total = 3 + tam_datos + 2;
-
-    // Comprobar que la trama sea correcta
-    if (!protocol_validate_frame(trama, tam_total)) {
+    // Esto es del CRC
+    // Comprobar que la trama sea correcta recibe la trama y longitud
+    if (!protocol_validate_frame(trama, 3 + tam_datos + 2)) {
         return SERIAL_INVALID;
     }
-
-    // Comprobar espacio disponible
-    if (tam_datos > capacidad ||
-        (tam_datos > 0 && datos == NULL)) {
+  
+    // Comprobar espacio disponible en memoria, para las tramas pues
+    if (tam_datos > capacity || (tam_datos > 0 && data == NULL)) {
         return SERIAL_INVALID;
     }
 
     // Extraer la informacion
-    *tipo = trama[1];
-    *longitud = tam_datos;
-
-    if (tam_datos > 0) {
-        memcpy(datos, trama + 3, tam_datos);
-    }
-
+    *type = trama[1];
+    *len = tam_datos;
+    // memcpy copia los bytes de un lugar a otro en memoria, copia la trama en data
+    memcpy(data, trama + 3, tam_datos);
+    
     return SERIAL_OK;
 }
