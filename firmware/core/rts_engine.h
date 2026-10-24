@@ -10,7 +10,7 @@ Uso por tick:
     3. rts_run(): ejecuta el trabajo de un tick de esa tarea
 
 Criterio de desempate:
-    1. Mayos criticidad
+    1. Mayor criticidad
     2. Menor id
 */
 
@@ -24,8 +24,8 @@ Criterio de desempate:
 
 // Tipos de datos para el scheduler
 typedef enum {
-    RTS_RMS = 0, // Scheduler de tasa fija (Rate Monotonic Scheduling)
-    RTS_EDF = 1, // Scheduler de fecha de entrega (Earliest Deadline First)
+    RTS_RMS = 0, // Rate Monotonic: prioridad fija, menor periodo primero
+    RTS_EDF = 1, // Earliest Deadline First: plazo absoluto mas cercano primero
 } rts_algo_t;
 
 // Tipos de eventos que genera el calendarizador
@@ -37,7 +37,7 @@ typedef enum {
     RTS_EV_DEADLINE_MISS, // Se pierde la fecha de entrega de una tarea
     RTS_EV_SPORADIC_IGNORED // Se presiono el boton antes del intervalo minimo
 
-}rst_event_type_t;
+} rts_event_type_t;
 
 
 // Estructura de datos para el calendarizador
@@ -64,7 +64,7 @@ typedef struct {
     uint32_t remaining_ut; // Unidades de trabajo restantes para completar la tarea
     uint32_t release_tick; // Tick en el que se libero la tarea
     uint32_t abs_deadline; // Tick en el que se debe completar la tarea (release_tick + D)
-    uint32_t next_release; // Tick en el que se debe liberar la siguiente instancia de la tarea (release_tick + T)(solo periodicas)
+    uint32_t next_release; // Tick en el que se debe liberar el siguiente trabajo (se le suma T en cada liberacion)(solo periodicas)
 
     // Para las esporadicas
     volatile bool sporadic_pending; // Lo pone el boton
@@ -89,7 +89,7 @@ typedef struct {
 
     bool running; // Indica si el scheduler esta corriendo
     uint32_t now; // Tick actual (0 = msj de inicio)
-    int current;
+    int current; // Indice (en tasks) de la tarea elegida en este tick, -1 = ninguna
     uint8_t last_id; // Id de la ultima tarea que se ejecuto (para detectar cambios de contexto)
     uint32_t busy_ticks; // Ticks que si corrio alguna tarea
 
@@ -111,7 +111,8 @@ void rts_start(rts_engine_t *e);
 // Detiene el calendarizador (las tareas se conservan)
 void rts_stop(rts_engine_t *e);
 
-// Registra que se presiono el boton. Solo
+// Registra que se presiono el boton. Solo marca una bandera, asi que
+// se puede llamar desde la interrupcion
 void rts_sporadic_trigger(rts_engine_t *e);
 
 // Paso 1 del tick: plazos, liberaciones y seleccion
