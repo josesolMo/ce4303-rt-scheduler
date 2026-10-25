@@ -10,212 +10,202 @@
 #include <errno.h>
 #include <termios.h>
 #include <poll.h>
+#include <time.h>
 
-// Con esta se abre y cierra el puerto serial
-int serial_open(const char *port){
+// Obtener hora para controlar los timeouts
+static long long serial_now_ms(void) {
+    struct timespec time;
+    clock_gettime(CLOCK_MONOTONIC, &time);
+    return (long long)time.tv_sec * 1000 + time.tv_nsec / 1000000;
+}
+
+// Abrir el puerto serial y configurarlo a 115200 baudios
+int serial_open(const char *port) {
+    if (port == NULL) {
+        return -1;
+    }
+
     int fd = open(port, O_RDWR | O_NOCTTY | O_NONBLOCK);
-
-    if (fd == -1){
+    if (fd == -1) {
         perror("Error al abrir puerto serial");
         return -1;
     }
 
     struct termios config;
-
-    if (tcgetattr(fd, &config) == -1){
-        perror("Error al obtener configuraciones");
+    if (tcgetattr(fd, &config) == -1) {
+        perror("Error en tcgetattr");
         close(fd);
         return -1;
     }
 
-    // Se configura una comunicación a 115200 baudios
-    cfsetispeed(&config, B115200);
-    cfsetospeed(&config, B115200);
-
-    // Configurar comunicacion de 8 bits, sin paridad
+    // Configuracion de 8 bits, sin paridad y sin procesar texto
     cfmakeraw(&config);
+    if (cfsetispeed(&config, B115200) == -1 || cfsetospeed(&config, B115200) == -1) {
+        close(fd);
+        return -1;
+    }
+
     config.c_cflag |= (CLOCAL | CREAD);
     config.c_cflag &= ~CSIZE;
     config.c_cflag |= CS8;
-
-    // No esperar datos dentro de read()
     config.c_cc[VMIN] = 0;
     config.c_cc[VTIME] = 0;
 
     if (tcsetattr(fd, TCSANOW, &config) == -1) {
-        perror("Error al configurar puerto");
+        perror("Error en tcsetattr");
         close(fd);
         return -1;
     }
 
-    // Volver a modo bloqueante
-    int flags = fcntl(fd, F_GETFL, 0);
-
-    if (flags == -1 ||
-        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == -1) {
-
-        perror("Error al configurar descriptor");
-        close(fd);
-        return -1;
-    }
-
+    // Se deja no bloqueante para controlar la espera con poll()
     printf("Puerto serial abierto: %s\n", port);
-
     return fd;
 }
 
-// Cerrar puerto serial
+// Cerrar un puerto que se abrio anteriormente
 void serial_close(int fd) {
-
     if (fd >= 0) {
         close(fd);
     }
 }
 
-// Enviar una trama por el puerto serial
-int serial_send(int fd, uint8_t type, const uint8_t *data, uint8_t len){
+// Enviar una trama completa, incluso si write() envia solo una parte
+int serial_send(int fd, uint8_t type, const uint8_t *data, uint8_t len) {
     if (fd < 0 || (len > 0 && data == NULL)) {
         return -1;
     }
 
-    // Máximo: 3 bytes de header + 255 de datos + 2 CRC
+    // El protocolo agrega 3 bytes de header y 2 de CRC
     uint8_t frame[260];
-
-    // Se crea el frame con el protocolo de common
-    size_t tam = protocol_build_frame(type, data, len, frame);
-
-    if (tam == 0){return -1;};
+    size_t size = protocol_build_frame(type, data, len, frame);
+    if (size == 0) {
+        return -1;
+    }
 
     size_t sent = 0;
+    long long deadline = serial_now_ms() + 2000;
 
-    // Enviar todos los bytes ajio
-    while (sent < tam) {
+    while (sent < size) {
+        ssize_t n = write(fd, frame + sent, size - sent);
 
-        ssize_t n = write(fd, frame + sent, tam - sent);
+        if (n > 0) {
+            sent += (size_t)n;
+            continue;
+        }
+        if (n == -1 && errno == EINTR) {
+            continue;
+        }
+        if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            int remaining = (int)(deadline - serial_now_ms());
+            if (remaining <= 0) {
+                return -1;
+            }
 
-        if (n < 0) {
-            if (errno == EINTR){continue;}
-
-            perror("Error al enviar el frame");
-            return -1;
+            struct pollfd pfd = {fd, POLLOUT, 0};
+            int result = poll(&pfd, 1, remaining);
+            if (result > 0 && (pfd.revents & POLLOUT)) {
+                continue;
+            }
+            if (result == -1 && errno == EINTR) {
+                continue;
+            }
         }
 
-        if (n == 0) {return -1;}
-
-        sent += (size_t)n;
+        perror("Error al enviar trama");
+        return -1;
     }
+
     return 0;
 }
 
-static int serial_read_bytes(int fd, uint8_t *buffer, size_t quantity, int timeout_ms){
-
+// Leer una cantidad exacta de bytes, con limite total de tiempo
+static int serial_read_bytes(int fd, uint8_t *buffer, size_t quantity, long long deadline) {
     size_t received = 0;
 
     while (received < quantity) {
-        // Esto es la estructura de la biblioteca poll
-        struct pollfd pfd;
-
-        pfd.fd = fd;
-        pfd.events = POLLIN;
-        pfd.revents = 0;
-
-        // Se esperan los datos gracias a poll
-        int result = poll(&pfd, 1, timeout_ms);
-
-        if (result == 0){
+        int remaining = (int)(deadline - serial_now_ms());
+        if (remaining <= 0) {
             return SERIAL_TIMEOUT;
         }
 
+        struct pollfd pfd = {fd, POLLIN, 0};
+        int result = poll(&pfd, 1, remaining);
+
+        if (result == 0) {
+            return SERIAL_TIMEOUT;
+        }
         if (result < 0) {
-            if (errno == EINTR){continue;}
-            
-            perror("Error en poll");
+            if (errno == EINTR) {
+                continue;
+            }
             return SERIAL_ERROR;
         }
-
-        // Detectar problemas con el puerto
-        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        if (pfd.revents & (POLLERR | POLLNVAL)) {
             return SERIAL_ERROR;
         }
-
         if (!(pfd.revents & POLLIN)) {
             return SERIAL_ERROR;
         }
 
         ssize_t n = read(fd, buffer + received, quantity - received);
-
-        if (n < 0) {
-
-            if (errno == EINTR || errno == EAGAIN) {
-                continue;
-            }
-
-            perror("Error al leer serial");
+        if (n > 0) {
+            received += (size_t)n;
+            continue;
+        }
+        if (n == 0) {
             return SERIAL_ERROR;
         }
-
-        if (n == 0) {return SERIAL_ERROR;}
-
-        received += (size_t)n;
+        if (errno == EINTR || errno == EAGAIN) {
+            continue;
+        }
+        return SERIAL_ERROR;
     }
 
     return SERIAL_OK;
 }
 
-
-// Recibir una trama completa
+// Recibir una trama y comprobar el CRC antes de entregar el payload
 int serial_receive(int fd, uint8_t *type, uint8_t *data, size_t capacity, uint8_t *len, int timeout_ms) {
-
-    if (fd < 0 || type == NULL || len == NULL) {
+    if (fd < 0 || type == NULL || len == NULL || timeout_ms < 0) {
         return SERIAL_ERROR;
     }
 
-    uint8_t trama[260];
+    uint8_t frame[260];
+    long long deadline = serial_now_ms() + timeout_ms;
 
-    // Buscar el byte de inicio
+    // Buscar el byte de inicio de la trama
     do {
+        int result = serial_read_bytes(fd, frame, 1, deadline);
+        if (result != SERIAL_OK) {
+            return result;
+        }
+    } while (frame[0] != START_BYTE);
 
-        int resultado = serial_read_bytes(fd, trama, 1, timeout_ms);
-
-        if (resultado != SERIAL_OK) {return resultado;}
-
-    } while (trama[0] != START_BYTE);
-
-    // Leer tipo de mensaje y longitud que son las siguientes posiciones de trama[1 y 2]
-    int resultado = serial_read_bytes(
-        fd, trama + 1, 2, timeout_ms
-    );
-
-    if (resultado != SERIAL_OK) {
-        return resultado;
+    // Primero leer tipo y longitud
+    int result = serial_read_bytes(fd, frame + 1, 2, deadline);
+    if (result != SERIAL_OK) {
+        return result;
     }
 
-    uint8_t tam_datos = trama[2];
+    uint8_t data_size = frame[2];
 
-    // Leer datos y CRC
-    resultado = serial_read_bytes(
-        fd, trama + 3, tam_datos + 2, timeout_ms
-    );
-
-    if (resultado != SERIAL_OK) {
-        return resultado;
+    // Luego leer payload y CRC
+    result = serial_read_bytes(fd, frame + 3, (size_t)data_size + 2, deadline);
+    if (result != SERIAL_OK) {
+        return result;
     }
-    // Esto es del CRC
-    // Comprobar que la trama sea correcta recibe la trama y longitud
-    if (!protocol_validate_frame(trama, 3 + tam_datos + 2)) {
+
+    if (!protocol_validate_frame(frame, (size_t)data_size + 5)) {
         return SERIAL_INVALID;
     }
-  
-    // Comprobar espacio disponible en memoria, para las tramas pues
-    if (tam_datos > capacity || (tam_datos > 0 && data == NULL)) {
+    if (data_size > capacity || (data_size > 0 && data == NULL)) {
         return SERIAL_INVALID;
     }
 
-    // Extraer la informacion
-    *type = trama[1];
-    *len = tam_datos;
-    // memcpy copia los bytes de un lugar a otro en memoria, copia la trama en data
-    memcpy(data, trama + 3, tam_datos);
-    
+    *type = frame[1];
+    *len = data_size;
+    if (data_size > 0) {
+        memcpy(data, frame + 3, data_size);
+    }
     return SERIAL_OK;
 }
