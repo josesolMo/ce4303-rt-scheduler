@@ -1,407 +1,687 @@
-#include <stdio.h>
-#include "../../../common/include/protocol.h"
 #include <Arduino.h>
 #include <esp_timer.h>
 #if __has_include(<esp_arduino_version.h>)
   #include <esp_arduino_version.h>
 #else
-  // Si el core es antiguo, usar la API de timer anterior a Arduino-ESP32 3.x.
   #define ESP_ARDUINO_VERSION_MAJOR 2
 #endif
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <string.h>
 
-// El encabezado ya declara sus funciones con extern "C" cuando se compila en C++.
-
+// Mantener estas rutas relativas a la estructura del proyecto.
 extern "C" {
-  #include "ut.h"
+  #include "../../../common/include/protocol.h"
+  #include "../../../common/include/wire_format.h"
   #include "rts_engine.h"
+  #include "ut.h"
 }
 
-// ---------------------------------------------------------------------------
-// Configuracion
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Hardware ESP32
+// -----------------------------------------------------------------------------
+// Cuatro LEDs representan el ID de tarea en binario (bit 0 primero).
+// GPIO32=bit0, GPIO33=bit1, GPIO26=bit2, GPIO25=bit3.
+static const int LED_TASK[4] = {32, 33, 26, 25};
+static const int LED_MISS = 23;
+static const int BUTTON_PIN = 22;  // botón entre GPIO22 y GND; INPUT_PULLUP
 
-// ID binario en cuatro LEDs (LSB primero):
-// GPIO 32 = bit 0, GPIO 33 = bit 1, GPIO 26 = bit 2, GPIO 25 = bit 3.
-const int LED_AZULES[4] = {32, 33, 26, 25};
-const int LED_ROJO = 23;
-const int BUTTON_PIN = 22;
-
-static const uint32_t TICK_US = 100000;          // 10 ms por tick
-static const uint32_t MISS_LED_US = 300000;      // LED rojo: 300 ms
-static const uint32_t CALIB_MARGIN = 70;         // 70% del tick para unidad_trabajo()
+static const uint32_t CALIB_MARGIN_PERCENT = 70;
 static const uint32_t CALIB_ROUNDS = 20;
-static const uint32_t BUTTON_STABLE_MS = 50;     // antirrebote estable
-static const uint32_t BUTTON_MIN_INTERVAL_MS = 200; // 200 ms entre pulsaciones aceptadas
+static const uint32_t MISS_LED_US = 300000;
+static const uint32_t BUTTON_DEBOUNCE_MS = 50;
+static const uint32_t DEFAULT_REPORT_EVERY = 50;
 
-// ---------------------------------------------------------------------------
-// Estado global
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Tipos de trama acordados con fake_host.py y wire_format.h
+// Formato: AA | tipo | longitud(1) | payload | CRC16-Modbus little-endian
+// -----------------------------------------------------------------------------
+static const uint8_t SOF = 0xAA;
+static const uint8_t MSG_CALIB_REQ_LOCAL       = 0x01;
+static const uint8_t MSG_CALIB_RESP_LOCAL      = 0x02;
+static const uint8_t MSG_TASK_DEPLOY_LOCAL     = 0x03;
+static const uint8_t MSG_ACK_LOCAL             = 0x04;
+static const uint8_t MSG_START_SYNC_LOCAL      = 0x05;
+static const uint8_t MSG_TICK_REPORT_LOCAL     = 0x06;
+static const uint8_t MSG_EVENT_SPORADIC_LOCAL  = 0x07;
+static const uint8_t MSG_EVENT_DEADLINE_LOCAL  = 0x08;
+static const uint8_t MSG_STOP_REQ_LOCAL        = 0x09;
+static const uint8_t MSG_EVENT_RELEASE_LOCAL   = 0x0A;
+static const uint8_t MSG_EVENT_FINISH_LOCAL    = 0x0B;
+static const uint8_t MSG_EXEC_BATCH_LOCAL      = 0x0C;
+static const uint8_t MSG_SPORADIC_SKIP_LOCAL  = 0x0D;
+static const uint8_t MSG_EVENT_START_LOCAL     = 0x0E;
+static const uint8_t MSG_TRIGGER_TASK_LOCAL    = 0x0F;
+static const uint8_t MSG_NODE_CONFIG_LOCAL     = 0x10;
+static const uint8_t MSG_NACK_LOCAL            = 0xFF;
 
+static const size_t MAX_RX_BUFFER = 512;
+static const uint8_t MAX_FRAME_PAYLOAD = 255;
+static const uint8_t MAX_BATCH_IDS = 250; // 5 bytes de cabecera + 250 IDs = payload 255
+static const uint8_t EVENT_QUEUE_CAPACITY = 64;
+
+// -----------------------------------------------------------------------------
+// Estado del nodo
+// -----------------------------------------------------------------------------
 static rts_engine_t engine;
-static uint32_t tick_us = TICK_US;
+static bool engine_initialized = false;
+static bool calibrated = false;
+static bool scheduler_running = false;
+static uint32_t tick_us = 10000; // valor inicial; el host lo reemplaza en CALIB_REQ
 static uint32_t ut_per_tick = 0;
-static uint32_t miss_led_ticks = 0;
-static uint32_t miss_led_off = 0;
+static uint32_t report_every = DEFAULT_REPORT_EVERY;
+static uint32_t miss_led_ticks = 30;
+static uint32_t miss_led_off_tick = 0;
 
-// El timer de hardware solo incrementa ticks_hw y despierta loop().
-// El motor RTS nunca se ejecuta desde la interrupcion del timer.
+// Timer hardware: la ISR solamente contabiliza un tick y notifica loop().
 static volatile uint32_t ticks_hw = 0;
 static uint32_t ticks_done = 0;
 static portMUX_TYPE tick_mux = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t loop_task_handle = nullptr;
 static hw_timer_t *scheduler_timer = nullptr;
+static volatile bool timer_active = false;
 
-// Estadisticas equivalentes a las del nodo Pico.
 static uint32_t max_tick_us = 0;
-static uint32_t overruns = 0;
+static uint32_t overrun_count = 0;
 static uint32_t total_misses = 0;
+static uint32_t dropped_events = 0;
+static uint8_t last_selected_id = RTS_IDLE;
 
-// Antirrebote y limitacion de frecuencia del boton.
-static int button_raw_last = HIGH;
-static int button_stable_state = HIGH;
-static uint32_t button_last_raw_change_ms = 0;
-static uint32_t button_last_accepted_ms = 0;
-static bool button_has_accepted_press = false;
+// Parser UART.
+static uint8_t rx_buffer[MAX_RX_BUFFER];
+static size_t rx_length = 0;
 
-// ---------------------------------------------------------------------------
-// Temporizador periodico del ESP32
-// ---------------------------------------------------------------------------
+// Interrupción del pulsador: solo marca que ocurrió una arista.
+static volatile bool button_irq_pending = false;
+static bool button_debounce_pending = false;
+static uint32_t button_debounce_started_ms = 0;
 
-static uint32_t read_ticks_hw(void)
-{
-    uint32_t result;
-    portENTER_CRITICAL(&tick_mux);
-    result = ticks_hw;
-    portEXIT_CRITICAL(&tick_mux);
-    return result;
+// EXEC_BATCH: IDs seleccionados durante ticks consecutivos.
+static uint8_t batch_ids[MAX_BATCH_IDS];
+static uint8_t batch_count = 0;
+static uint32_t batch_start_tick = 0;
+
+// Eventos generados por el motor; se transmiten fuera del callback.
+struct queued_event_t {
+  uint8_t message_type;
+  uint8_t task_id;
+  uint32_t tick;
+};
+static queued_event_t event_queue[EVENT_QUEUE_CAPACITY];
+static uint8_t event_head = 0;
+static uint8_t event_tail = 0;
+static uint8_t event_count = 0;
+
+// -----------------------------------------------------------------------------
+// CRC y framing
+// -----------------------------------------------------------------------------
+static uint16_t crc16_modbus(const uint8_t *data, size_t length) {
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < length; ++i) {
+    crc ^= data[i];
+    for (int bit = 0; bit < 8; ++bit) {
+      crc = (crc & 1U) ? (uint16_t)((crc >> 1) ^ 0xA001U)
+                       : (uint16_t)(crc >> 1);
+    }
+  }
+  return crc;
 }
 
-static void IRAM_ATTR scheduler_timer_isr(void)
-{
-    portENTER_CRITICAL_ISR(&tick_mux);
-    ticks_hw++;
-    portEXIT_CRITICAL_ISR(&tick_mux);
-
-    // Despertar loop() para que procese los ticks pendientes.
-    BaseType_t higher_priority_task_woken = pdFALSE;
-    TaskHandle_t handle = loop_task_handle;
-    if (handle != nullptr) {
-        vTaskNotifyGiveFromISR(handle, &higher_priority_task_woken);
-    }
-    if (higher_priority_task_woken == pdTRUE) {
-        portYIELD_FROM_ISR();
-    }
+static void send_frame(uint8_t message_type, const uint8_t *payload, uint8_t length) {
+  uint8_t frame[3 + 255 + 2];
+  frame[0] = SOF;
+  frame[1] = message_type;
+  frame[2] = length;
+  if (length > 0 && payload != nullptr) {
+    memcpy(&frame[3], payload, length);
+  }
+  const uint16_t crc = crc16_modbus(frame, 3 + length);
+  frame[3 + length] = (uint8_t)(crc & 0xFF);
+  frame[4 + length] = (uint8_t)(crc >> 8);
+  Serial.write(frame, (size_t)(5 + length));
 }
 
-// Configura el timer de hardware con un contador de 1 MHz (1 cuenta = 1 us).
-// Arduino-ESP32 3.x y 2.x cambiaron la API del timer, por eso se contemplan ambas.
-static bool start_scheduler_timer(void)
-{
+static void send_ack(uint8_t id) {
+  send_frame(MSG_ACK_LOCAL, &id, 1);
+}
+
+static void send_nack(uint8_t id) {
+  send_frame(MSG_NACK_LOCAL, &id, 1);
+}
+
+static void send_u32_frame(uint8_t message_type, uint32_t value) {
+  uint8_t payload[4];
+  wire_put_u32(payload, value);
+  send_frame(message_type, payload, sizeof(payload));
+}
+
+static void send_tick_id_event(uint8_t message_type, uint32_t tick, uint8_t id) {
+  uint8_t payload[5];
+  wire_put_u32(payload, tick);
+  payload[4] = id;
+  send_frame(message_type, payload, sizeof(payload));
+}
+
+// El protocolo del Gantt reserva ID 0 para un tick ocioso.
+static uint8_t wire_task_id(uint8_t id) {
+  return (id == RTS_IDLE) ? 0 : id;
+}
+
+// -----------------------------------------------------------------------------
+// Calibración
+// -----------------------------------------------------------------------------
+static uint32_t calibrate(uint32_t requested_tick_us) {
+  uint32_t worst = UINT32_MAX;
+  for (uint32_t round = 0; round < CALIB_ROUNDS; ++round) {
+    uint32_t count = 0;
+    const int64_t start_us = esp_timer_get_time();
+    while ((uint64_t)(esp_timer_get_time() - start_us) < requested_tick_us) {
+      unidad_trabajo();
+      ++count;
+    }
+    if (count < worst) worst = count;
+  }
+  const uint32_t calibrated_ut = (worst * CALIB_MARGIN_PERCENT) / 100U;
+  return (calibrated_ut == 0) ? 1 : calibrated_ut;
+}
+
+// -----------------------------------------------------------------------------
+// LEDs
+// -----------------------------------------------------------------------------
+static void leds_init(void) {
+  for (int i = 0; i < 4; ++i) {
+    pinMode(LED_TASK[i], OUTPUT);
+    digitalWrite(LED_TASK[i], LOW);
+  }
+  pinMode(LED_MISS, OUTPUT);
+  digitalWrite(LED_MISS, LOW);
+}
+
+static void leds_show_task(uint8_t id) {
+  const uint8_t bits = (id == RTS_IDLE) ? 0 : (uint8_t)(id & 0x0F);
+  for (int bit = 0; bit < 4; ++bit) {
+    digitalWrite(LED_TASK[bit], (bits >> bit) & 0x01);
+  }
+}
+
+static void leds_all_off(void) {
+  leds_show_task(RTS_IDLE);
+  digitalWrite(LED_MISS, LOW);
+}
+
+// -----------------------------------------------------------------------------
+// Cola de eventos y callback del motor RTS
+// -----------------------------------------------------------------------------
+static void queue_event(uint8_t message_type, uint32_t tick, uint8_t task_id) {
+  if (event_count >= EVENT_QUEUE_CAPACITY) {
+    ++dropped_events;
+    return;
+  }
+  event_queue[event_tail].message_type = message_type;
+  event_queue[event_tail].tick = tick;
+  event_queue[event_tail].task_id = task_id;
+  event_tail = (uint8_t)((event_tail + 1U) % EVENT_QUEUE_CAPACITY);
+  ++event_count;
+}
+
+static bool task_is_sporadic(uint8_t id) {
+  if (!engine_initialized) return false;
+  for (int i = 0; i < engine.count; ++i) {
+    if (engine.tasks[i].info.id == id) {
+      return engine.tasks[i].info.type == 'S';
+    }
+  }
+  return false;
+}
+
+static void on_event(const rts_event_t *ev, void *ctx) {
+  (void)ctx;
+  switch (ev->type) {
+    case RTS_EV_RELEASE:
+      // 0x07 identifica liberación de la esporádica; 0x0A, periódicas.
+      queue_event(task_is_sporadic(ev->task_id) ? MSG_EVENT_SPORADIC_LOCAL
+                                                : MSG_EVENT_RELEASE_LOCAL,
+                  ev->tick, ev->task_id);
+      break;
+
+    case RTS_EV_COMPLETE:
+      queue_event(MSG_EVENT_FINISH_LOCAL, ev->tick, ev->task_id);
+      break;
+
+    case RTS_EV_DEADLINE_MISS:
+      queue_event(MSG_EVENT_DEADLINE_LOCAL, ev->tick, ev->task_id);
+      digitalWrite(LED_MISS, HIGH);
+      miss_led_off_tick = ev->tick + miss_led_ticks;
+      ++total_misses;
+      break;
+
+    case RTS_EV_SPORADIC_IGNORED:
+      queue_event(MSG_SPORADIC_SKIP_LOCAL, ev->tick, ev->task_id);
+      break;
+
+    case RTS_EV_SWITCH:
+      // EVENT_START indica que comienza a ejecutarse una tarea (no el estado idle).
+      if (ev->task_id != RTS_IDLE) {
+        queue_event(MSG_EVENT_START_LOCAL, ev->tick, ev->task_id);
+      }
+      break;
+  }
+}
+
+static void drain_event_queue(void) {
+  while (event_count > 0) {
+    const queued_event_t ev = event_queue[event_head];
+    event_head = (uint8_t)((event_head + 1U) % EVENT_QUEUE_CAPACITY);
+    --event_count;
+    send_tick_id_event(ev.message_type, ev.tick, ev.task_id);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// EXEC_BATCH y reportes periódicos
+// -----------------------------------------------------------------------------
+static void flush_exec_batch(void) {
+  if (batch_count == 0) return;
+
+  uint8_t payload[5 + MAX_BATCH_IDS];
+  wire_put_u32(payload, batch_start_tick);
+  payload[4] = batch_count;
+  memcpy(&payload[5], batch_ids, batch_count);
+  send_frame(MSG_EXEC_BATCH_LOCAL, payload, (uint8_t)(5 + batch_count));
+  batch_count = 0;
+}
+
+static void append_exec_id(uint32_t tick_index, uint8_t id) {
+  if (batch_count == 0) batch_start_tick = tick_index;
+  batch_ids[batch_count++] = wire_task_id(id);
+  if (batch_count >= MAX_BATCH_IDS || batch_count >= report_every) {
+    flush_exec_batch();
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Temporizador periódico de hardware, compatible con Arduino-ESP32 2.x/3.x
+// -----------------------------------------------------------------------------
+static uint32_t read_ticks_hw(void) {
+  uint32_t result;
+  portENTER_CRITICAL(&tick_mux);
+  result = ticks_hw;
+  portEXIT_CRITICAL(&tick_mux);
+  return result;
+}
+
+static void IRAM_ATTR scheduler_timer_isr(void) {
+  if (!timer_active) return;
+
+  portENTER_CRITICAL_ISR(&tick_mux);
+  ++ticks_hw;
+  portEXIT_CRITICAL_ISR(&tick_mux);
+
+  BaseType_t higher_priority_task_woken = pdFALSE;
+  TaskHandle_t handle = loop_task_handle;
+  if (handle != nullptr) {
+    vTaskNotifyGiveFromISR(handle, &higher_priority_task_woken);
+  }
+  if (higher_priority_task_woken == pdTRUE) {
+    portYIELD_FROM_ISR();
+  }
+}
+
+static bool start_scheduler_timer(void) {
+  if (scheduler_timer != nullptr) return true;
+
+  portENTER_CRITICAL(&tick_mux);
+  ticks_hw = 0;
+  portEXIT_CRITICAL(&tick_mux);
+  ticks_done = 0;
+  loop_task_handle = xTaskGetCurrentTaskHandle();
+
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
-    scheduler_timer = timerBegin(1000000);
-    if (scheduler_timer == nullptr) {
-        return false;
-    }
-    timerAttachInterrupt(scheduler_timer, &scheduler_timer_isr);
-    timerAlarm(scheduler_timer, tick_us, true, 0);
+  scheduler_timer = timerBegin(1000000); // 1 MHz: una cuenta por microsegundo
+  if (scheduler_timer == nullptr) return false;
+  timerAttachInterrupt(scheduler_timer, &scheduler_timer_isr);
+  timer_active = true;
+  timerAlarm(scheduler_timer, tick_us, true, 0);
 #else
-    scheduler_timer = timerBegin(0, 80, true); // APB 80 MHz / 80 = 1 MHz
-    if (scheduler_timer == nullptr) {
-        return false;
-    }
-    timerAttachInterrupt(scheduler_timer, &scheduler_timer_isr, true);
-    timerAlarmWrite(scheduler_timer, tick_us, true);
-    timerAlarmEnable(scheduler_timer);
+  scheduler_timer = timerBegin(0, 80, true); // 80 MHz / 80 = 1 MHz
+  if (scheduler_timer == nullptr) return false;
+  timerAttachInterrupt(scheduler_timer, &scheduler_timer_isr, true);
+  timerAlarmWrite(scheduler_timer, tick_us, true);
+  timer_active = true;
+  timerAlarmEnable(scheduler_timer);
 #endif
-    return true;
+  return true;
 }
 
-// ---------------------------------------------------------------------------
-// Calibracion: mide UT por tick y reserva CALIB_MARGIN % para trabajo
-// ---------------------------------------------------------------------------
-
-static uint32_t calibrate(uint32_t tick_len_us)
-{
-    uint32_t worst = UINT32_MAX;
-
-    for (uint32_t r = 0; r < CALIB_ROUNDS; r++) {
-        uint32_t count = 0;
-        const int64_t start = esp_timer_get_time();
-
-        while ((uint64_t)(esp_timer_get_time() - start) < tick_len_us) {
-            unidad_trabajo();
-            count++;
-        }
-
-        if (count < worst) {
-            worst = count;
-        }
-    }
-
-    const uint32_t result = (worst * CALIB_MARGIN) / 100;
-    return (result == 0) ? 1 : result;
+static void stop_scheduler_timer(void) {
+  timer_active = false;
+  if (scheduler_timer != nullptr) {
+    timerEnd(scheduler_timer);
+    scheduler_timer = nullptr;
+  }
 }
 
-// ---------------------------------------------------------------------------
-// LEDs: representar el ID de la tarea en binario, igual que la Pico
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Protocolo del host: tareas se despliegan antes de START_SYNC.
+// -----------------------------------------------------------------------------
+static void handle_calib_req(const uint8_t *payload, uint8_t length) {
+  if (length != 4 || scheduler_running || (engine_initialized && engine.count > 0)) {
+    send_nack(0);
+    return;
+  }
 
-static void leds_init(void)
-{
-    for (int i = 0; i < 4; i++) {
-        pinMode(LED_AZULES[i], OUTPUT);
-        digitalWrite(LED_AZULES[i], LOW);
-    }
+  const uint32_t requested_tick_us = wire_get_u32(payload);
+  if (requested_tick_us < 1000U || requested_tick_us > 1000000U) {
+    send_nack(0);
+    return;
+  }
 
-    pinMode(LED_ROJO, OUTPUT);
-    digitalWrite(LED_ROJO, LOW);
+  tick_us = requested_tick_us;
+  ut_per_tick = calibrate(tick_us);
+  miss_led_ticks = (MISS_LED_US + tick_us - 1U) / tick_us;
+  if (miss_led_ticks == 0) miss_led_ticks = 1;
+  calibrated = true;
+  send_u32_frame(MSG_CALIB_RESP_LOCAL, ut_per_tick);
 }
 
-static void leds_show_task(uint8_t id)
-{
-    const uint32_t value = (id == RTS_IDLE) ? 0 : (id & 0x0F);
-
-    for (int i = 0; i < 4; i++) {
-        digitalWrite(LED_AZULES[i], (value >> i) & 0x01);
-    }
+static void handle_node_config(const uint8_t *payload, uint8_t length) {
+  if (length != 2) {
+    send_nack(0);
+    return;
+  }
+  const uint16_t requested_report = (uint16_t)payload[0] |
+                                    ((uint16_t)payload[1] << 8);
+  if (requested_report == 0) {
+    send_nack(0);
+    return;
+  }
+  report_every = requested_report;
+  send_ack(0);
 }
 
-// ---------------------------------------------------------------------------
-// Callback de eventos del motor RTS
-// ---------------------------------------------------------------------------
+static void handle_task_deploy(const uint8_t *payload, uint8_t length) {
+  const uint8_t id = (length >= 2) ? payload[1] : 0;
+  if (!calibrated || scheduler_running || length != 16) {
+    send_nack(id);
+    return;
+  }
 
-static void on_event(const rts_event_t *ev, void *ctx)
-{
-    (void)ctx;
+  const uint8_t algorithm = payload[0];
+  const uint8_t task_id = payload[1];
+  const char task_type = (char)payload[2];
+  const uint32_t work = wire_get_u32(&payload[3]);
+  const uint32_t period = wire_get_u32(&payload[7]);
+  const uint32_t deadline = wire_get_u32(&payload[11]);
+  const uint8_t criticality = payload[15];
 
-    switch (ev->type) {
-        case RTS_EV_DEADLINE_MISS:
-            Serial.printf("[%lu] PLAZO PERDIDO T%u\n",
-                          (unsigned long)ev->tick, ev->task_id);
-            digitalWrite(LED_ROJO, HIGH);
-            miss_led_off = ev->tick + miss_led_ticks;
-            total_misses++;
-            break;
+  if ((algorithm != ALG_RMS && algorithm != ALG_EDF) ||
+      task_id == 0 || task_id == RTS_IDLE ||
+      (task_type != 'P' && task_type != 'S') ||
+      work == 0 || period == 0 || deadline == 0) {
+    send_nack(task_id);
+    return;
+  }
 
-        case RTS_EV_SPORADIC_IGNORED:
-            Serial.printf("[%lu] boton ignorado T%u\n",
-                          (unsigned long)ev->tick, ev->task_id);
-            break;
+  const rts_algo_t rts_algorithm = (algorithm == ALG_RMS) ? RTS_RMS : RTS_EDF;
+  if (!engine_initialized) {
+    rts_init(&engine, rts_algorithm, ut_per_tick, on_event, nullptr);
+    engine_initialized = true;
+  } else if (engine.algo != rts_algorithm) {
+    // Todas las tareas de un mismo nodo deben utilizar el algoritmo desplegado.
+    send_nack(task_id);
+    return;
+  }
 
-        case RTS_EV_RELEASE:
-            if (ev->task_id == 3) {
-                Serial.printf("[%lu] Libera esporadica T3\n",
-                              (unsigned long)ev->tick);
-            }
-            break;
+  Task task = {
+    .id = task_id,
+    .type = task_type,
+    .W = work,
+    .T = period,
+    .D = deadline,
+    .priority = criticality
+  };
 
-        case RTS_EV_COMPLETE:
-            if (ev->task_id == 3) {
-                Serial.printf("[%lu] Termina T3 (respuesta %lu ticks)\n",
-                              (unsigned long)ev->tick,
-                              (unsigned long)ev->value);
-            }
-            break;
-
-        case RTS_EV_SWITCH:
-            // Se deja sin imprimir para no añadir carga de Serial en cada cambio.
-            break;
-    }
+  if (rts_add_task(&engine, &task) != 0) {
+    send_nack(task_id); // por ejemplo, ID repetido o segunda tarea esporádica
+    return;
+  }
+  send_ack(task_id);
 }
 
-// ---------------------------------------------------------------------------
-// Tareas de prueba: mismos IDs y parámetros que el nodo Raspberry Pi Pico
-// ---------------------------------------------------------------------------
-
-static bool load_test_tasks(void)
-{
-    Task a = {
-        .id = 1,
-        .type = 'P',
-        .W = 2 * ut_per_tick,
-        .T = 5,
-        .D = 5,
-        .priority = 1
-    };
-
-    Task b = {
-        .id = 2,
-        .type = 'P',
-        .W = 4 * ut_per_tick,
-        .T = 7,
-        .D = 7,
-        .priority = 1
-    };
-
-    Task s = {
-        .id = 3,
-        .type = 'S',
-        .W = 2 * ut_per_tick,
-        .T = 10,
-        .D = 10,
-        .priority = 2
-    };
-
-    if (rts_add_task(&engine, &a) != 0 ||
-        rts_add_task(&engine, &b) != 0 ||
-        rts_add_task(&engine, &s) != 0) {
-        Serial.println("ERROR: no se pudieron registrar todas las tareas RTS.");
-        return false;
+static bool trigger_sporadic_id(uint8_t requested_id) {
+  if (!engine_initialized || !scheduler_running) return false;
+  for (int i = 0; i < engine.count; ++i) {
+    if (engine.tasks[i].info.id == requested_id && engine.tasks[i].info.type == 'S') {
+      rts_sporadic_trigger(&engine);
+      return true;
     }
-
-    return true;
+  }
+  return false;
 }
 
-// ---------------------------------------------------------------------------
-// Boton esporadico
-// Se lee desde loop(), nunca desde la interrupcion/temporizador.
-// ---------------------------------------------------------------------------
+static void handle_start_sync(uint8_t length) {
+  if (length != 0 || !calibrated || !engine_initialized ||
+      engine.count == 0 || scheduler_running) {
+    send_nack(0);
+    return;
+  }
 
-static void check_button(void)
-{
-    const uint32_t now_ms = millis();
-    const int raw = digitalRead(BUTTON_PIN);
+  event_head = event_tail = event_count = 0;
+  batch_count = 0;
+  max_tick_us = 0;
+  overrun_count = 0;
+  total_misses = 0;
+  dropped_events = 0;
+  last_selected_id = RTS_IDLE;
+  miss_led_off_tick = 0;
+  leds_all_off();
 
-    if (raw != button_raw_last) {
-        button_raw_last = raw;
-        button_last_raw_change_ms = now_ms;
-    }
-
-    // Aceptar un cambio de estado solo si permanecio estable 50 ms.
-    if ((uint32_t)(now_ms - button_last_raw_change_ms) >= BUTTON_STABLE_MS &&
-        raw != button_stable_state) {
-
-        button_stable_state = raw;
-
-        // INPUT_PULLUP: LOW significa pulsado.
-        if (button_stable_state == LOW) {
-            const bool interval_ok =
-                !button_has_accepted_press ||
-                (uint32_t)(now_ms - button_last_accepted_ms) >= BUTTON_MIN_INTERVAL_MS;
-
-            if (interval_ok) {
-                button_last_accepted_ms = now_ms;
-                button_has_accepted_press = true;
-
-                Serial.println("Boton detectado: solicitando tarea esporadica T3");
-                rts_sporadic_trigger(&engine);
-            }
-        }
-    }
+  rts_start(&engine); // establece el tick lógico cero
+  if (!start_scheduler_timer()) {
+    rts_stop(&engine);
+    send_nack(0);
+    return;
+  }
+  scheduler_running = true;
+  send_ack(0);
 }
 
-// ---------------------------------------------------------------------------
-// Setup
-// ---------------------------------------------------------------------------
-
-void setup(void)
-{
-    Serial.begin(115200);
-    delay(2000);
-
-    leds_init();
-    pinMode(BUTTON_PIN, INPUT_PULLUP);
-
-    // Secuencia de arranque para comprobar los cuatro LEDs.
-    for (int i = 0; i < 4; i++) {
-        digitalWrite(LED_AZULES[i], HIGH);
-        delay(100);
-        digitalWrite(LED_AZULES[i], LOW);
-    }
-
-    button_raw_last = digitalRead(BUTTON_PIN);
-    button_stable_state = button_raw_last;
-    button_last_raw_change_ms = millis();
-
-    Serial.println("Nodo ESP32 - iniciando calibracion...");
-
-    tick_us = TICK_US;
-    ut_per_tick = calibrate(tick_us);
-    miss_led_ticks = MISS_LED_US / tick_us;
-    if (miss_led_ticks == 0) {
-        miss_led_ticks = 1;
-    }
-
-    Serial.printf("Tick: %lu us -> s_n = %lu UT por tick (con %lu%% de margen)\n",
-                  (unsigned long)tick_us,
-                  (unsigned long)ut_per_tick,
-                  (unsigned long)CALIB_MARGIN);
-
-    rts_init(&engine, RTS_EDF, ut_per_tick, on_event, nullptr);
-
-    if (!load_test_tasks()) {
-        while (true) {
-            delay(1000);
-        }
-    }
-
-    rts_start(&engine);
-
-    // Inicializar contador y guardar el handle del task Arduino loop.
-    portENTER_CRITICAL(&tick_mux);
-    ticks_hw = 0;
-    portEXIT_CRITICAL(&tick_mux);
-    ticks_done = 0;
-    loop_task_handle = xTaskGetCurrentTaskHandle();
-
-    // Timer de hardware independiente de loop(): solo cuenta ticks.
-    if (!start_scheduler_timer()) {
-        Serial.println("ERROR: no se pudo iniciar el timer de hardware del ESP32.");
-        while (true) {
-            delay(1000);
-        }
-    }
-
-    Serial.println("=== Motor RTS iniciado ===");
+static void handle_stop_req(uint8_t length) {
+  if (length != 0) {
+    send_nack(0);
+    return;
+  }
+  if (scheduler_running) {
+    stop_scheduler_timer();
+    scheduler_running = false;
+    flush_exec_batch();
+    drain_event_queue();
+    rts_stop(&engine);
+  }
+  leds_all_off();
+  send_ack(0);
 }
 
-// ---------------------------------------------------------------------------
-// Loop: despierta con cada tick y procesa todos los ticks pendientes
-// ---------------------------------------------------------------------------
+static void handle_frame(uint8_t message_type, const uint8_t *payload, uint8_t length) {
+  switch (message_type) {
+    case MSG_CALIB_REQ_LOCAL:
+      handle_calib_req(payload, length);
+      break;
 
-void loop(void)
-{
-    // Dormir hasta que la ISR del timer notifique un tick.
-    (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    case MSG_NODE_CONFIG_LOCAL:
+      handle_node_config(payload, length);
+      break;
 
-    check_button();
+    case MSG_TASK_DEPLOY_LOCAL:
+      handle_task_deploy(payload, length);
+      break;
 
-    uint32_t hw_snapshot = read_ticks_hw();
-    if ((uint32_t)(hw_snapshot - ticks_done) > 1) {
-        overruns++;
+    case MSG_START_SYNC_LOCAL:
+      handle_start_sync(length);
+      break;
+
+    case MSG_STOP_REQ_LOCAL:
+      handle_stop_req(length);
+      break;
+
+    case MSG_TRIGGER_TASK_LOCAL:
+      if (length == 1 && trigger_sporadic_id(payload[0])) {
+        send_ack(0);
+      } else {
+        send_nack((length == 1) ? payload[0] : 0);
+      }
+      break;
+
+    default:
+      send_nack(0);
+      break;
+  }
+}
+
+static void parse_rx_buffer(void) {
+  while (true) {
+    size_t start = 0;
+    while (start < rx_length && rx_buffer[start] != SOF) ++start;
+    if (start > 0) {
+      memmove(rx_buffer, &rx_buffer[start], rx_length - start);
+      rx_length -= start;
+    }
+    if (rx_length < 3) return;
+
+    const uint8_t payload_length = rx_buffer[2];
+    const size_t frame_length = 3U + payload_length + 2U;
+    if (rx_length < frame_length) return;
+
+    const uint16_t calculated = crc16_modbus(rx_buffer, 3U + payload_length);
+    const uint16_t received = (uint16_t)rx_buffer[3U + payload_length] |
+                              ((uint16_t)rx_buffer[4U + payload_length] << 8);
+    if (calculated != received) {
+      send_nack(0);
+      // Descarta solo el byte SOF para poder resincronizar si había otro SOF.
+      memmove(rx_buffer, &rx_buffer[1], rx_length - 1U);
+      --rx_length;
+      continue;
     }
 
-    // Si el procesamiento se atraso, procesar todos los ticks acumulados.
-    while (ticks_done != read_ticks_hw()) {
-        const int64_t start_us = esp_timer_get_time();
+    const uint8_t message_type = rx_buffer[1];
+    const uint8_t *payload = &rx_buffer[3];
+    handle_frame(message_type, payload, payload_length);
 
-        const uint8_t id = rts_tick(&engine);
-        leds_show_task(id);
-        rts_run(&engine);
-        ticks_done++;
+    memmove(rx_buffer, &rx_buffer[frame_length], rx_length - frame_length);
+    rx_length -= frame_length;
+  }
+}
 
-        const uint32_t elapsed_us = (uint32_t)(esp_timer_get_time() - start_us);
-        if (elapsed_us > max_tick_us) {
-            max_tick_us = elapsed_us;
-        }
-
-        // Apagar el LED rojo al vencer el intervalo establecido.
-        if (engine.now >= miss_led_off) {
-            digitalWrite(LED_ROJO, LOW);
-        }
-
-        // Resumen una vez por segundo, como en la Raspberry Pi Pico.
-        const uint32_t ticks_per_second = 1000000UL / tick_us;
-        if (ticks_per_second != 0 && engine.now % ticks_per_second == 0) {
-            Serial.printf("[%lu] tick max: %lu us (%lu%% del tick)  atrasos: %lu  perdidos: %lu\n",
-                          (unsigned long)engine.now,
-                          (unsigned long)max_tick_us,
-                          (unsigned long)((uint64_t)max_tick_us * 100 / tick_us),
-                          (unsigned long)overruns,
-                          (unsigned long)total_misses);
-            max_tick_us = 0;
-        }
+static void poll_serial(void) {
+  while (Serial.available() > 0) {
+    const int value = Serial.read();
+    if (value < 0) break;
+    if (rx_length < sizeof(rx_buffer)) {
+      rx_buffer[rx_length++] = (uint8_t)value;
+    } else {
+      rx_length = 0;
+      send_nack(0);
     }
+  }
+  parse_rx_buffer();
+}
+
+// -----------------------------------------------------------------------------
+// Botón físico: ISR mínima, antirrebote y registro fuera de la ISR.
+// El intervalo mínimo T de la tarea lo valida el motor RTS.
+// -----------------------------------------------------------------------------
+static void IRAM_ATTR button_isr(void) {
+  // La ISR no calibra, no imprime y no ejecuta el motor: solo marca la arista.
+  button_irq_pending = true;
+}
+
+static void process_button(void) {
+  bool got_irq = false;
+  noInterrupts();
+  if (button_irq_pending) {
+    button_irq_pending = false;
+    got_irq = true;
+  }
+  interrupts();
+
+  if (got_irq) {
+    button_debounce_pending = true;
+    button_debounce_started_ms = millis();
+  }
+
+  if (button_debounce_pending &&
+      (uint32_t)(millis() - button_debounce_started_ms) >= BUTTON_DEBOUNCE_MS) {
+    button_debounce_pending = false;
+    if (digitalRead(BUTTON_PIN) == LOW && scheduler_running && engine_initialized) {
+      // Solo marca la solicitud; la liberación real ocurre en rts_tick().
+      for (int i = 0; i < engine.count; ++i) {
+        if (engine.tasks[i].info.type == 'S') {
+          rts_sporadic_trigger(&engine);
+          break;
+        }
+      }
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Procesamiento de ticks del scheduler
+// -----------------------------------------------------------------------------
+static void process_pending_ticks(void) {
+  const uint32_t hw_snapshot = read_ticks_hw();
+  if ((uint32_t)(hw_snapshot - ticks_done) > 1U) {
+    ++overrun_count;
+  }
+
+  while (ticks_done != read_ticks_hw() && scheduler_running) {
+    const int64_t start_us = esp_timer_get_time();
+    const uint32_t tick_index = engine.now;
+
+    // Apagar al inicio del tick límite, no al final del tick del evento.
+    // Esto mantiene el LED visible incluso cuando tick_us > MISS_LED_US.
+    if (engine.now >= miss_led_off_tick) {
+      digitalWrite(LED_MISS, LOW);
+    }
+
+    const uint8_t id = rts_tick(&engine);
+    last_selected_id = id;
+    leds_show_task(id);
+    append_exec_id(tick_index, id);
+    rts_run(&engine);
+    ++ticks_done;
+
+    drain_event_queue();
+
+    if (report_every > 0 && (engine.now % report_every) == 0) {
+      send_tick_id_event(MSG_TICK_REPORT_LOCAL, engine.now, wire_task_id(last_selected_id));
+      // Si el lote no se vació automáticamente (por ejemplo, N > 250), cerrar
+      // aquí el fragmento restante para que el reporte termine en este tick.
+      flush_exec_batch();
+    }
+
+    // Incluye planificación, trabajo, encolado/transmisión de eventos y reportes.
+    const uint32_t elapsed_us = (uint32_t)(esp_timer_get_time() - start_us);
+    if (elapsed_us > max_tick_us) max_tick_us = elapsed_us;
+  }
+}
+
+void setup(void) {
+  Serial.begin(115200);
+  leds_init();
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), button_isr, FALLING);
+
+  // No cargar tareas ni iniciar el timer aquí. El host gobierna la secuencia:
+  // CALIB_REQ -> NODE_CONFIG -> TASK_DEPLOY* -> START_SYNC -> STOP_REQ.
+  loop_task_handle = xTaskGetCurrentTaskHandle();
+}
+
+void loop(void) {
+  // Espera acotada: permite recibir comandos aun antes de START_SYNC,
+  // sin usar delay() ni ejecutar el trabajo del scheduler fuera de sus ticks.
+  (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
+
+  poll_serial();
+  process_button();
+  if (scheduler_running) process_pending_ticks();
 }
