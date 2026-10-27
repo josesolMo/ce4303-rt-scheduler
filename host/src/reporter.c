@@ -27,10 +27,10 @@ static const char *nombre_evento(int tipo) {
 
 static const char *motivo_rechazo(int codigo) {
     switch (codigo) {
-        case 1: return "pendiente replanificacion verde";
+        case 1: return "tarea periodica no readmitida en el nodo superviviente";
         case 2: return "fallo despliegue de reubicacion";
         case 3: return "esporadica no reubicable";
-        case 4: return "admision manual rechazada/no implementada";
+        case 4: return "tarea manual no admitida o sin nodo activo";
         case 5: return "fallo de ACK en despliegue";
         default: return "";
     }

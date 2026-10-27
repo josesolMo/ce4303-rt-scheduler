@@ -16,9 +16,13 @@
 #define MSG_TRIGGER_TASK   0x0F
 #define MSG_NODE_CONFIG    0x10
 
-// MSG_CALIB_REQ   -> tick_us[4]
-// MSG_CALIB_RESP  -> ut_por_tick[4]
-// MSG_NODE_CONFIG -> N_reporte[2] (cada cuantos ticks enviar reporte)
+// Formato serial final de referencia del proyecto:
+// [START (1B) | TYPE (1B) | LEN (1B) | PAYLOAD (N) | CRC16 (2B)]
+//
+// Payloads en uso por la version actual del host:
+// MSG_CALIB_REQ   -> tick_us[4]                    
+// MSG_CALIB_RESP  -> ut_por_tick[4]               
+// MSG_NODE_CONFIG -> N_reporte[2]                 
 // MSG_TASK_DEPLOY -> alg[1], id[1], tipo[1], W[4], T[4], D[4], criticidad[1] (16 bytes)
 // MSG_ACK         -> id[1] para tarea; 0 para inicio/stop/trigger
 // MSG_START_SYNC  -> sin payload; comienza tick 0 al recibirlo
@@ -29,6 +33,10 @@
 // MSG_TRIGGER_TASK -> id_tarea[1] (disparo desde host, si lo aceptan)
 // MSG_NACK_ERR    -> id[1] opcional
 // id 0 en MSG_EXEC_BATCH significa tick ocioso
+//
+// Nota: esta representacion corresponde al contrato del proyecto y debe mantenerse
+// consistente con la firma de los metodos de serial_driver y la implementacion del
+// firmware del nodo.
 
 static inline void wire_put_u32(uint8_t *p, uint32_t n) {
     p[0] = (uint8_t)n;
