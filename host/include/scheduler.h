@@ -4,7 +4,7 @@
 #include "../../common/include/task_types.h"
 #include "host_config.h"
 
-// Admisión y particionado del planificador verde.
+// Admisión y particionado de tareas en el planificador host.
 int planner_preparar(const Config *c, const uint32_t capacidades[2], Plan *p);
 int planner_reubicar(const Plan *p, const uint32_t capacidades[2],
                     int nodo_caido, int nodo_vivo,

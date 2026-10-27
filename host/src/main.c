@@ -191,7 +191,7 @@ static void manual(SharedMemory *m, Plan *p, const Config *c, int activos[2], co
     int nodo = 0;
     uint32_t sn[2] = {m->node_capacity[0], m->node_capacity[1]};
     if (planner_admitir_manual(p, sn, tarea, &nodo) != 0 || nodo < 1 || nodo > 2 || !activos[nodo - 1]) {
-        printf("No admitida: falta el modulo de admision verde o no cabe\n");
+        printf("No admitida: no supera la admision o el nodo no esta activo\n");
         guardar(m, EVENTO_TAREA_RECHAZADA, 0, tarea.id, 4);
         return;
     }
@@ -215,7 +215,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     memset(&plan, 0, sizeof(plan));
-    printf("ATENCION: asignaciones temporales, SIN pruebas de admision\n");
+    printf("Planificador host activo; la conformidad completa requiere validar firmware y hardware\n");
     SharedMemory *m = ipc_create();
     if (!m) {
         fprintf(stderr, "SHM anterior? Ver README para limpiar\n");
@@ -254,7 +254,7 @@ int main(int argc, char **argv) {
             terminar = 1;
         }
     }
-    // La parte verde necesita los valores calibrados ANTES de asignar tareas.
+    // La admision y asignacion requieren las capacidades calibradas de ambos nodos.
     if (!terminar) {
         uint32_t sn[2] = {m->node_capacity[0], m->node_capacity[1]};
         if (planner_preparar(&config, sn, &plan) != 0) {

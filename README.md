@@ -25,8 +25,10 @@ make test
    inicio, recepcion, Gantt, STOP y reporte.
 2. Desconexion simulada: deteccion de nodo caido y registro de rechazos.
 
-**El algoritmo verde NO esta en estas pruebas.** Las asignaciones vienen
-provisionalmente de `host/config/asignaciones.csv`, sin admision.
+El planificador host implementa admission RMS/EDF, seleccion de nodo,
+reubicacion y admision manual. Las pruebas PTY actuales ejercitan comunicacion
+y reportes; aun falta probar por separado las decisiones del planificador con
+casos limite y resultados esperados para cada algoritmo.
 
 ## Ejecutar con ESP32 y Raspberry Pi Pico
 
@@ -48,8 +50,8 @@ Despues:
 ```
 
 Dentro del programa, presionar `q` para terminar. En una terminal,
-se puede teclear `a ID P W T D criticidad` para intentar insertar una
-tarea, pero esa funcion NO admite ninguna hasta conectar el modulo verde.
+se puede teclear `a ID P/S W T D criticidad` para intentar insertar una
+tarea; el host la asigna solo si supera la admision RMS/EDF y hay un nodo activo.
 
 ## Archivos que genera
 
@@ -82,17 +84,20 @@ Makefile
 En el repositorio principal `firmware/` debe permanecer como una carpeta
 hermana de `host/` y `common/` (no meterla dentro de `host/`).
 
-## Limites importantes
+## Pendiente para cumplir la especificacion
 
-- `planner_bridge.c` es TEMPORAL: no hace First-Fit, Worst-Fit ni admision
-  RMS/EDF; tampoco reubica tareas reales tras una desconexion.
-- El inicio manda START a ambos drivers sin esperar el ACK primero del
-  otro, pero todavia hay que medir el desfase real del tick cero.
-- La cola compartida es acotada. Si se llena descarta y cuenta eventos;
-  hay que confirmar que alcance con la carga del profesor.
-- El reporte es tan completo como los mensajes que el firmware mande.
-- El proyecto necesita pruebas con hardware, experimentos de RMS/EDF y
-  FF/WF, validacion de errores de entrada y documentacion final.
+- Implementar el motor de tiempo real en `firmware/core/rts_engine.c` y
+  conectarlo a las aplicaciones de Pico y ESP32: liberacion de tareas,
+  planificacion RMS/EDF, deadlines, ejecucion y activacion de esporadicas.
+- Agregar pruebas unitarias del planificador host para RMS, EDF, seleccion de
+  nodo, admision manual y reubicacion; comprobar los resultados con las
+  formulas y restricciones del documento del proyecto.
+- Completar la integracion UART/timer en ambos firmwares y verificar en
+  hardware el protocolo existente, la sincronizacion de inicio, los reportes
+  y la recuperacion ante la caida de un nodo. No cambiar el protocolo sin
+  contrastar primero el comportamiento observado con el documento.
+- Medir que los reportes y la cola compartida soporten la carga requerida y
+  documentar los resultados de las pruebas RMS/EDF y FF/WF.
 
 Si una ejecucion se cierra de forma abrupta y queda la SHM vieja,
 revisa que no exista ningun host activo y despues borra solo su objeto:
