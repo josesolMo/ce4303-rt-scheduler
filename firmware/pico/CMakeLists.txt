@@ -35,6 +35,7 @@ set(REPO_ROOT ${CMAKE_CURRENT_LIST_DIR}/../..)
 
 add_executable(pico_firmware
     main.c
+    link.c                                    # serial USB: tramas y búfer de salida
     ${REPO_ROOT}/firmware/core/rts_engine.c   # calendarizador local (compartido con ESP32)
     ${REPO_ROOT}/common/src/protocol.c        # armado y validación de tramas
     ${REPO_ROOT}/common/src/crc16.c           # CRC-16
