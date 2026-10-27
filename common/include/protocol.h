@@ -24,6 +24,23 @@ typedef struct __attribute__((packed)) {
     uint8_t payload_len;
 } FrameHeader;
 
+/*
+ * Protocolo serial del proyecto:
+ * [START (1B) | TYPE (1B) | LEN (1B) | PAYLOAD (N) | CRC16 (2B)]
+ *
+ * El payload y su longitud dependen del tipo de mensaje. El host y los nodos
+ * deben documentar exactamente el formato de cada payload para mantener la
+ * compatibilidad entre las dos partes.
+ *
+ * Mensajes utilizados por la version actual del host:
+ *   MSG_CALIB_REQ   -> tick_us[4]
+ *   MSG_CALIB_RESP  -> ut_por_tick[4]
+ *   MSG_TASK_DEPLOY -> alg[1], id[1], tipo[1], W[4], T[4], D[4], criticidad[1]
+ *   MSG_ACK        -> id[1]
+ *   MSG_START_SYNC -> sin payload
+ *   MSG_STOP_REQ   -> sin payload
+ */
+
 /**
  * @brief Construye una trama completa lista para enviar por puerto serial.
  *        Agrega el START_BYTE, TYPE, PAYLOAD_LEN, PAYLOAD y el CRC16 al final.

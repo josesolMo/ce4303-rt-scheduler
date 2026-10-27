@@ -6,6 +6,10 @@
 #include <stdio.h>
 #include <string.h>
 
+/*
+ * El costo de una tarea en un nodo se calcula como ceil(W / s_n), segun el PDF.
+ * El costo es la cantidad de ticks que necesita la tarea en ese nodo.
+ */
 static uint32_t task_cost_ticks(const Task *task, uint32_t capacidad) {
     if (!task || capacidad == 0U || task->T == 0U) {
         return UINT32_MAX;
@@ -15,6 +19,11 @@ static uint32_t task_cost_ticks(const Task *task, uint32_t capacidad) {
     return (uint32_t)((work + cap - 1U) / cap);
 }
 
+/*
+ * Utilizacion de la tarea en un nodo:
+ *     U = C / T
+ * donde C = ceil(W / s_n).
+ */
 static double task_utilization(const Task *task, uint32_t capacidad) {
     if (!task || task->T == 0U || capacidad == 0U) {
         return 0.0;
@@ -23,6 +32,10 @@ static double task_utilization(const Task *task, uint32_t capacidad) {
     return (double)costo / (double)task->T;
 }
 
+/*
+ * Límite de admision RMS oficial del proyecto:
+ *     sum(C_i/T_i) <= n * (2^(1/n) - 1)
+ */
 static double rms_bound(int n) {
     if (n <= 0) {
         return 0.0;
