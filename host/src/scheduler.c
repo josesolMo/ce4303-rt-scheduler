@@ -62,7 +62,15 @@ static int node_admits_task_exact(const Plan *plan, int node, const Task *task,
         return 0;
     }
 
-    double total = node_utilization_for_node(plan, node, capacidad);
+    int count = 0;
+    double total = 0.0;
+    for (int i = 0; i < plan->cantidad; i++) {
+        if (plan->nodo[i] == node) {
+            total += task_utilization(&plan->tareas[i], capacidad);
+            count++;
+        }
+    }
+
     double nuevo = total + task_utilization(task, capacidad);
 
     if (algoritmo == ALG_EDF) {
@@ -70,14 +78,8 @@ static int node_admits_task_exact(const Plan *plan, int node, const Task *task,
     }
 
     if (algoritmo == ALG_RMS) {
-        int count = 0;
-        for (int i = 0; i < plan->cantidad; i++) {
-            if (plan->nodo[i] == node) {
-                count++;
-            }
-        }
-        count++;
-        return nuevo <= rms_bound(count) + DBL_EPSILON;
+        int total_tasks = count + 1;
+        return nuevo <= rms_bound(total_tasks) + DBL_EPSILON;
     }
 
     return 0;
@@ -93,17 +95,28 @@ static int choose_node(const Plan *plan, const uint32_t capacidades[2],
             continue;
         }
 
-        uint32_t costo = task_cost_ticks(task, capacidades[nodo]);
-        double margen = (double)capacidades[nodo] - (double)costo;
+        int count = 0;
+        double total = 0.0;
+        for (int i = 0; i < plan->cantidad; i++) {
+            if (plan->nodo[i] == nodo + 1) {
+                total += task_utilization(&plan->tareas[i], capacidades[nodo]);
+                count++;
+            }
+        }
+        double nuevo = total + task_utilization(task, capacidades[nodo]);
+        double slack = (algoritmo == ALG_EDF)
+            ? (1.0 - nuevo)
+            : (rms_bound(count + 1) - nuevo);
+
         if (heuristica == 1) {
-            if (elegido < 0 || margen > mejor_criterio) {
+            if (elegido < 0 || slack > mejor_criterio) {
                 elegido = nodo + 1;
-                mejor_criterio = margen;
+                mejor_criterio = slack;
             }
         } else {
             if (elegido < 0) {
                 elegido = nodo + 1;
-                mejor_criterio = margen;
+                mejor_criterio = slack;
             }
         }
     }
@@ -186,6 +199,15 @@ int planner_preparar(const Config *c, const uint32_t capacidades[2], Plan *p) {
     return build_default_plan(p, c, capacidades);
 }
 
+static int planner_node_candidate_for_task(const Plan *p, int node,
+                                          const uint32_t capacidades[2],
+                                          const Task *task, int algoritmo) {
+    if (!p || !task || node < 1 || node > 2) {
+        return 0;
+    }
+    return node_admits_task_exact(p, node, task, capacidades[node - 1], algoritmo);
+}
+
 int planner_reubicar(const Plan *p, const uint32_t capacidades[2],
                      int nodo_caido, int nodo_vivo,
                      Task *resultado, int maximo) {
@@ -241,14 +263,26 @@ int planner_admitir_manual(Plan *p, const uint32_t capacidades[2], Task tarea,
 
     for (int nodo = 0; nodo < 2; nodo++) {
         int node = nodo + 1;
-        if (!node_admits_task_exact(p, node, &tarea, capacidades[nodo], ALG_EDF) &&
-            !node_admits_task_exact(p, node, &tarea, capacidades[nodo], ALG_RMS)) {
+        if (!planner_node_candidate_for_task(p, node, capacidades, &tarea, ALG_EDF) &&
+            !planner_node_candidate_for_task(p, node, capacidades, &tarea, ALG_RMS)) {
             continue;
         }
 
-        double total = node_utilization_for_node(p, node, capacidades[nodo]) +
-                       task_utilization(&tarea, capacidades[nodo]);
-        double slack = (double)capacidades[nodo] - total;
+        int count = 0;
+        double total = 0.0;
+        for (int i = 0; i < p->cantidad; i++) {
+            if (p->nodo[i] == node) {
+                total += task_utilization(&p->tareas[i], capacidades[nodo]);
+                count++;
+            }
+        }
+
+        double nuevo = total + task_utilization(&tarea, capacidades[nodo]);
+        double slack = (1.0 - nuevo);
+        if (nuevo <= rms_bound(count + 1) + DBL_EPSILON) {
+            slack = rms_bound(count + 1) - nuevo;
+        }
+
         if (mejor_nodo < 0 || slack > mejor_slack) {
             mejor_nodo = node;
             mejor_slack = slack;
