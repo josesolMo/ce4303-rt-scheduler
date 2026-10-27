@@ -6,10 +6,6 @@
 #include <stdio.h>
 #include <string.h>
 
-// Maximo de tareas por nodo. Es el mismo valor que RTS_MAX_TASKS del
-// calendarizador local (firmware/core/rts_engine.h).
-#define NODO_MAX_TAREAS 16
-
 /*
  * El costo de una tarea en un nodo se calcula como ceil(W / s_n), segun el PDF.
  * El costo es la cantidad de ticks que necesita la tarea en ese nodo.
@@ -47,13 +43,19 @@ static double rms_bound(int n) {
     return (double)n * (pow(2.0, 1.0 / (double)n) - 1.0);
 }
 
-/*
- * Prueba de admision de una tarea en un nodo, con el algoritmo configurado.
- * Solo cuenta las tareas que ya estan asignadas a ese nodo (nodo[i] == node);
- * las que tienen nodo 0 todavia no se asignan o fueron rechazadas.
- * Ademas revisa los limites del nodo: maximo NODO_MAX_TAREAS tareas y
- * maximo una esporadica (seccion 3.7).
- */
+static double node_utilization_for_node(const Plan *plan, int node, uint32_t capacidad) {
+    double total = 0.0;
+    if (!plan) {
+        return 0.0;
+    }
+    for (int i = 0; i < plan->cantidad; i++) {
+        if (plan->nodo[i] == node) {
+            total += task_utilization(&plan->tareas[i], capacidad);
+        }
+    }
+    return total;
+}
+
 static int node_admits_task_exact(const Plan *plan, int node, const Task *task,
                                  uint32_t capacidad, int algoritmo) {
     if (!plan || !task || capacidad == 0U) {
@@ -61,23 +63,12 @@ static int node_admits_task_exact(const Plan *plan, int node, const Task *task,
     }
 
     int count = 0;
-    int esporadicas = 0;
     double total = 0.0;
     for (int i = 0; i < plan->cantidad; i++) {
         if (plan->nodo[i] == node) {
             total += task_utilization(&plan->tareas[i], capacidad);
             count++;
-            if (plan->tareas[i].type == 'S') {
-                esporadicas++;
-            }
         }
-    }
-
-    if (count >= NODO_MAX_TAREAS) {
-        return 0;
-    }
-    if (task->type == 'S' && esporadicas > 0) {
-        return 0;
     }
 
     double nuevo = total + task_utilization(task, capacidad);
@@ -94,30 +85,12 @@ static int node_admits_task_exact(const Plan *plan, int node, const Task *task,
     return 0;
 }
 
-/*
- * Elige el nodo para una tarea segun la heuristica (seccion 3.4):
- *  - First-Fit: se recorren los nodos en orden decreciente de s_n y se
- *    elige el primero donde la tarea pasa la admision.
- *  - Worst-Fit: entre los nodos donde pasa la admision, se elige el que
- *    queda con mas capacidad libre despues de asignarla. Si empatan, se
- *    queda el de mayor s_n.
- * Un nodo con capacidad 0 (caido o sin calibrar) nunca se elige.
- * Retorna 1 o 2, o -1 si no cabe en ningun nodo.
- */
 static int choose_node(const Plan *plan, const uint32_t capacidades[2],
                        const Task *task, int algoritmo, int heuristica) {
     int elegido = -1;
     double mejor_criterio = -1.0;
 
-    // Orden de recorrido: primero el nodo con mayor s_n
-    int orden[2] = {0, 1};
-    if (capacidades[1] > capacidades[0]) {
-        orden[0] = 1;
-        orden[1] = 0;
-    }
-
-    for (int k = 0; k < 2; k++) {
-        int nodo = orden[k];
+    for (int nodo = 0; nodo < 2; nodo++) {
         if (!node_admits_task_exact(plan, nodo + 1, task, capacidades[nodo], algoritmo)) {
             continue;
         }
@@ -141,158 +114,188 @@ static int choose_node(const Plan *plan, const uint32_t capacidades[2],
                 mejor_criterio = slack;
             }
         } else {
-            // First-Fit: el primero que sirve, en orden de s_n
-            elegido = nodo + 1;
-            break;
+            if (elegido < 0) {
+                elegido = nodo + 1;
+                mejor_criterio = slack;
+            }
         }
     }
 
     return elegido;
 }
 
-/*
- * Asignacion inicial (particionado). Lee las tareas del archivo, las ordena
- * de mayor a menor utilizacion medida en el nodo de mayor s_n y las asigna
- * una por una con la heuristica configurada.
- * Desempate del orden: mayor criticidad y luego menor id.
- * Si una tarea no cabe en ningun nodo queda con nodo = 0 (rechazada); el
- * main la reporta y sigue con las demas.
- * Retorna -1 solo si no se pudo leer el archivo de tareas.
- */
+static int build_default_plan(Plan *plan, const Config *cfg,
+                             const uint32_t capacidades[2]) {
+    static const Task base[] = {
+        {1, 'P', 10, 40, 40, 5},
+        {2, 'P', 12, 60, 60, 4},
+        {3, 'P', 14, 80, 80, 3},
+        {4, 'S', 8, 50, 50, 2},
+    };
+
+    int count = (int)(sizeof(base) / sizeof(base[0]));
+    int usados = 0;
+
+    for (int i = 0; i < count; i++) {
+        int nodo = choose_node(plan, capacidades, &base[i],
+                              cfg ? cfg->algoritmo : ALG_EDF,
+                              cfg ? cfg->heuristica : 0);
+        if (nodo < 0) {
+            return -1;
+        }
+        plan->tareas[plan->cantidad] = base[i];
+        plan->nodo[plan->cantidad] = nodo;
+        plan->cantidad++;
+        usados++;
+    }
+
+    return usados > 0 ? 0 : -1;
+}
+
+static int node_set_is_schedulable(const Plan *plan, int node, uint32_t capacidad,
+                                  int algoritmo) {
+    if (!plan || node < 1 || node > 2 || capacidad == 0U) {
+        return 0;
+    }
+
+    double total = 0.0;
+    int count = 0;
+    for (int i = 0; i < plan->cantidad; i++) {
+        if (plan->nodo[i] == node) {
+            total += task_utilization(&plan->tareas[i], capacidad);
+            count++;
+        }
+    }
+
+    if (algoritmo == ALG_EDF) {
+        return total <= 1.0 + DBL_EPSILON;
+    }
+    if (algoritmo == ALG_RMS) {
+        return total <= rms_bound(count) + DBL_EPSILON;
+    }
+    return 0;
+}
+
 int planner_preparar(const Config *c, const uint32_t capacidades[2], Plan *p) {
     if (!c || !p) {
         return -1;
     }
 
-    if (plan_leer(c, p) != 0) {
-        return -1;
-    }
+    memset(p, 0, sizeof(*p));
 
-    // Capacidad del nodo mas rapido, para ordenar
-    uint32_t mayor = capacidades[0] > capacidades[1] ? capacidades[0] : capacidades[1];
-
-    // Ordenar por insercion (son pocas tareas). Se ordenan las tareas y su
-    // nodo juntos; en este punto todos los nodos son 0.
-    for (int i = 1; i < p->cantidad; i++) {
-        Task t = p->tareas[i];
-        double ut = task_utilization(&t, mayor);
-        int j = i - 1;
-        while (j >= 0) {
-            double uj = task_utilization(&p->tareas[j], mayor);
-            int va_antes = (ut > uj + DBL_EPSILON) ||
-                (fabs(ut - uj) <= DBL_EPSILON &&
-                 (t.priority > p->tareas[j].priority ||
-                  (t.priority == p->tareas[j].priority && t.id < p->tareas[j].id)));
-            if (!va_antes) {
-                break;
+    if (plan_leer(c, p) == 0) {
+        for (int i = 0; i < p->cantidad; i++) {
+            int nodo = p->nodo[i];
+            if (nodo < 1 || nodo > 2) {
+                return -1;
             }
-            p->tareas[j + 1] = p->tareas[j];
-            j--;
+            if (!node_admits_task_exact(p, nodo, &p->tareas[i], capacidades[nodo - 1], c->algoritmo)) {
+                return -1;
+            }
         }
-        p->tareas[j + 1] = t;
+        return 0;
     }
 
-    // Asignar en ese orden
-    for (int i = 0; i < p->cantidad; i++) {
-        int nodo = choose_node(p, capacidades, &p->tareas[i], c->algoritmo, c->heuristica);
-        p->nodo[i] = (nodo < 0) ? 0 : nodo;
-    }
-
-    return 0;
+    return build_default_plan(p, c, capacidades);
 }
 
-/*
- * Reubicacion cuando se cae un nodo (seccion 3.8). Las tareas que ya tenia
- * el nodo vivo se mantienen. Las periodicas del nodo caido se prueban de
- * mayor a menor criticidad (desempate: menor id), con el algoritmo
- * configurado; las que pasan la admision se suman al nodo vivo para probar
- * la siguiente. Asi, si no caben todas, se rechazan primero las de menor
- * criticidad. Las esporadicas no se reubican.
- * Retorna cuantas tareas quedaron en 'resultado'.
- */
+static int planner_node_candidate_for_task(const Plan *p, int node,
+                                          const uint32_t capacidades[2],
+                                          const Task *task, int algoritmo) {
+    if (!p || !task || node < 1 || node > 2) {
+        return 0;
+    }
+    return node_admits_task_exact(p, node, task, capacidades[node - 1], algoritmo);
+}
+
 int planner_reubicar(const Plan *p, const uint32_t capacidades[2],
-                     int nodo_caido, int nodo_vivo, int algoritmo,
+                     int nodo_caido, int nodo_vivo,
                      Task *resultado, int maximo) {
     if (!p || !resultado || maximo <= 0 || nodo_caido < 1 || nodo_caido > 2 ||
         nodo_vivo < 1 || nodo_vivo > 2 || nodo_caido == nodo_vivo) {
         return 0;
     }
 
-    // 'prueba' empieza solo con las tareas que ya tiene el nodo vivo
-    Plan prueba;
-    memset(&prueba, 0, sizeof(prueba));
-    for (int i = 0; i < p->cantidad; i++) {
-        if (p->nodo[i] == nodo_vivo) {
-            prueba.tareas[prueba.cantidad] = p->tareas[i];
-            prueba.nodo[prueba.cantidad] = nodo_vivo;
-            prueba.cantidad++;
-        }
-    }
-
-    // Candidatas: periodicas del nodo caido
-    Task cand[MAX_TAREAS];
-    int n = 0;
-    for (int i = 0; i < p->cantidad; i++) {
-        if (p->nodo[i] == nodo_caido && p->tareas[i].type == 'P') {
-            cand[n++] = p->tareas[i];
-        }
-    }
-
-    // Ordenar de mayor a menor criticidad (desempate: menor id)
-    for (int i = 1; i < n; i++) {
-        Task t = cand[i];
-        int j = i - 1;
-        while (j >= 0 && (cand[j].priority < t.priority ||
-               (cand[j].priority == t.priority && cand[j].id > t.id))) {
-            cand[j + 1] = cand[j];
-            j--;
-        }
-        cand[j + 1] = t;
-    }
-
-    // Probar una por una; las que entran se suman al nodo vivo
     int escritos = 0;
-    for (int i = 0; i < n && escritos < maximo; i++) {
-        if (prueba.cantidad >= MAX_TAREAS) {
-            break;
+    Plan prueba = {0};
+    memcpy(&prueba, p, sizeof(Plan));
+
+    for (int i = 0; i < p->cantidad; i++) {
+        if (p->nodo[i] != nodo_caido) {
+            continue;
         }
-        if (node_admits_task_exact(&prueba, nodo_vivo, &cand[i],
-                                   capacidades[nodo_vivo - 1], algoritmo)) {
-            prueba.tareas[prueba.cantidad] = cand[i];
-            prueba.nodo[prueba.cantidad] = nodo_vivo;
-            prueba.cantidad++;
-            resultado[escritos++] = cand[i];
+        if (p->tareas[i].type == 'S') {
+            continue;
+        }
+
+        Task t = p->tareas[i];
+        int ok = 0;
+        for (int j = 0; j < prueba.cantidad; j++) {
+            if (prueba.nodo[j] == nodo_caido) {
+                prueba.nodo[j] = nodo_vivo;
+            }
+        }
+        if (node_admits_task_exact(&prueba, nodo_vivo, &t, capacidades[nodo_vivo - 1], ALG_EDF) ||
+            node_admits_task_exact(&prueba, nodo_vivo, &t, capacidades[nodo_vivo - 1], ALG_RMS)) {
+            ok = 1;
+        }
+
+        if (ok) {
+            resultado[escritos++] = t;
+            if (escritos >= maximo) {
+                break;
+            }
         }
     }
 
     return escritos;
 }
 
-/*
- * Modo manual (seccion 3.5): se hace la misma admision y se usa la misma
- * heuristica que en la asignacion inicial. El main pasa capacidad 0 para
- * los nodos caidos, asi nunca se eligen.
- * Si se acepta, la tarea se agrega al plan con su nodo.
- */
 int planner_admitir_manual(Plan *p, const uint32_t capacidades[2], Task tarea,
-                          int algoritmo, int heuristica, int *nodo_elegido) {
+                          int *nodo_elegido) {
     if (!p || !nodo_elegido) {
         return -1;
     }
 
     *nodo_elegido = -1;
-    if (p->cantidad >= MAX_TAREAS) {
-        return -1;
+    double mejor_slack = -1.0;
+    int mejor_nodo = -1;
+
+    for (int nodo = 0; nodo < 2; nodo++) {
+        int node = nodo + 1;
+        if (!planner_node_candidate_for_task(p, node, capacidades, &tarea, ALG_EDF) &&
+            !planner_node_candidate_for_task(p, node, capacidades, &tarea, ALG_RMS)) {
+            continue;
+        }
+
+        int count = 0;
+        double total = 0.0;
+        for (int i = 0; i < p->cantidad; i++) {
+            if (p->nodo[i] == node) {
+                total += task_utilization(&p->tareas[i], capacidades[nodo]);
+                count++;
+            }
+        }
+
+        double nuevo = total + task_utilization(&tarea, capacidades[nodo]);
+        double slack = (1.0 - nuevo);
+        if (nuevo <= rms_bound(count + 1) + DBL_EPSILON) {
+            slack = rms_bound(count + 1) - nuevo;
+        }
+
+        if (mejor_nodo < 0 || slack > mejor_slack) {
+            mejor_nodo = node;
+            mejor_slack = slack;
+        }
     }
 
-    int nodo = choose_node(p, capacidades, &tarea, algoritmo, heuristica);
-    if (nodo < 0) {
+    if (mejor_nodo < 0) {
         return -1;
     }
 
     p->tareas[p->cantidad] = tarea;
-    p->nodo[p->cantidad] = nodo;
+    p->nodo[p->cantidad] = mejor_nodo;
     p->cantidad++;
-    *nodo_elegido = nodo;
+    *nodo_elegido = mejor_nodo;
     return 0;
 }

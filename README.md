@@ -74,7 +74,7 @@ common/
 host/
     include/        archivos .h de cada modulo
     src/            main.c, driver.c, reporter.c, ipc_shm.c, etc.
-    config/         host.conf, tasks_input.txt
+    config/         host.conf, tasks_input.txt, asignaciones.csv
 tools/
     test_integracion.py
 BASE_ORIGINAL_USUARIO/   los archivos adjuntos originales
