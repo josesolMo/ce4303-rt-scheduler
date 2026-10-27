@@ -12,7 +12,6 @@ typedef struct {
     int reportes_perdidos;
     char puerto[2][160];
     char archivo_tareas[256];
-    char archivo_asignaciones[256];
     char carpeta_reporte[256];
 } Config;
 

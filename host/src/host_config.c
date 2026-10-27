@@ -82,7 +82,8 @@ int config_leer(const char *ruta, Config *c) {
             texto(c->archivo_tareas, sizeof(c->archivo_tareas), valor);
         }
         else if (!strcmp(clave, "archivo_asignaciones")) {
-            texto(c->archivo_asignaciones, sizeof(c->archivo_asignaciones), valor);
+            // Ya no se usa: la asignacion la hace el planificador con FF/WF.
+            // Se acepta la clave para que no fallen configuraciones viejas.
         }
         else if (!strcmp(clave, "carpeta_reporte")) {
             texto(c->carpeta_reporte, sizeof(c->carpeta_reporte), valor);
@@ -92,7 +93,7 @@ int config_leer(const char *ruta, Config *c) {
     fclose(f);
     if (c->tick_ms < 1 || c->tick_ms > 1000 || c->reporte_cada < 1 ||
         c->reportes_perdidos < 1 || c->reporte_cada > 65535 || !c->puerto[0][0] || !c->puerto[1][0] ||
-        !c->archivo_tareas[0] || !c->archivo_asignaciones[0]) return -1;
+        !c->archivo_tareas[0]) return -1;
     return 0;
 }
 
@@ -103,6 +104,10 @@ int plan_buscar(const Plan *p, int id) {
     return -1;
 }
 
+// Lee las tareas del archivo (formato fijo: id,tipo,W,T,D,criticidad).
+// La asignacion a nodos la hace el planificador (planner_preparar), aqui
+// todas quedan con nodo 0. Una linea invalida se informa y se salta, para
+// que una entrada mala no termine el host.
 int plan_leer(const Config *c, Plan *p) {
     if (!c || !p) {
         return -1;
@@ -123,47 +128,18 @@ int plan_leer(const Config *c, Plan *p) {
         char tipo, extra;
         if (sscanf(s, " %u , %c , %u , %u , %u , %u %c", &id, &tipo, &w, &t, &d, &pr, &extra) != 6 ||
             id < 1 || id > 255 || (tipo != 'P' && tipo != 'S') || w == 0 || t == 0 || d == 0 ||
-            pr > 255 || p->cantidad == MAX_TAREAS || plan_buscar(p, (int)id) >= 0) {
-            fprintf(stderr, "Tarea invalida: %s\n", s);
-            fclose(f); return -1;
-        }
-        p->tareas[p->cantidad++] = (Task){(uint8_t)id, tipo, w, t, d, (uint8_t)pr};
-    }
-    fclose(f);
-    f = fopen(c->archivo_asignaciones, "r");
-    if (!f) {
-        perror(c->archivo_asignaciones);
-        return -1;
-    }
-    int total[2] = {0, 0}, sporadicas[2] = {0, 0};
-    int asignadas = 0;
-    while (fgets(linea, sizeof(linea), f)) {
-        char *s = limpiar(linea);
-        if (!*s || *s == '#') {
+            pr > 255 || plan_buscar(p, (int)id) >= 0) {
+            fprintf(stderr, "Tarea invalida (se ignora): %s\n", s);
             continue;
         }
-        int id, nodo;
-        char extra;
-        if (sscanf(s, " %d , %d %c", &id, &nodo, &extra) != 2 || nodo < 1 || nodo > 2) {
-            fprintf(stderr, "Asignacion invalida: %s\n", s); fclose(f); return -1;
+        if (p->cantidad == MAX_TAREAS) {
+            fprintf(stderr, "Demasiadas tareas, se ignora: %s\n", s);
+            continue;
         }
-        int pos = plan_buscar(p, id);
-        if (pos == -1 || p->nodo[pos] != 0) {
-            fclose(f);
-            return -1;
-        }
-        p->nodo[pos] = nodo;
-        total[nodo - 1]++;
-        if (p->tareas[pos].type == 'S') {
-            sporadicas[nodo - 1]++;
-        }
-        asignadas++;
+        p->tareas[p->cantidad] = (Task){(uint8_t)id, tipo, w, t, d, (uint8_t)pr};
+        p->nodo[p->cantidad] = 0;
+        p->cantidad++;
     }
     fclose(f);
-    if (asignadas != p->cantidad || total[0] > 8 || total[1] > 8 ||
-        sporadicas[0] > 1 || sporadicas[1] > 1) {
-        fprintf(stderr, "Asignaciones incompletas o demasiadas tareas por nodo\n");
-        return -1;
-    }
     return 0;
 }

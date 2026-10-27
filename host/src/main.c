@@ -110,7 +110,7 @@ static int iniciar_ambos(SharedMemory *m, int activos[2], const Config *c) {
     return correcto ? 0 : -1;
 }
 
-static void reaccion_falla(SharedMemory *m, const Plan *p, const Config *c,
+static void reaccion_falla(SharedMemory *m, Plan *p, const Config *c,
                            int nodo_caido, int activos[2]) {
     printf("Nodo %d caido. Se avisa al planificador.\n", nodo_caido);
     guardar(m, EVENTO_NODO_CAIDO, nodo_caido, 0, 0);
@@ -120,7 +120,8 @@ static void reaccion_falla(SharedMemory *m, const Plan *p, const Config *c,
     int cantidad = 0;
     uint32_t sn[2] = {m->node_capacity[0], m->node_capacity[1]};
     if (activos[vivo - 1]) {
-        cantidad = planner_reubicar(p, sn, nodo_caido, vivo, reubicar, MAX_TAREAS);
+        cantidad = planner_reubicar(p, sn, nodo_caido, vivo, c->algoritmo,
+                                    reubicar, MAX_TAREAS);
     }
     if (cantidad < 0) {
         cantidad = 0;
@@ -132,8 +133,13 @@ static void reaccion_falla(SharedMemory *m, const Plan *p, const Config *c,
         if (reubicar[j].type == 'S') {
             continue; // Esporadicas no se reubican.
         }
+        int pos = plan_buscar(p, reubicar[j].id);
         if (pedir(m, vivo, CMD_DESPLEGAR, &reubicar[j], c) != 0) {
             guardar(m, EVENTO_TAREA_RECHAZADA, nodo_caido, reubicar[j].id, 2);
+        } else if (pos >= 0) {
+            // Actualizar el plan para que el modo manual cuente esta tarea
+            p->nodo[pos] = vivo;
+            printf("Tarea %u reubicada en el nodo %d\n", reubicar[j].id, vivo);
         }
     }
     for (int i = 0; i < p->cantidad; i++) {
@@ -149,11 +155,13 @@ static void reaccion_falla(SharedMemory *m, const Plan *p, const Config *c,
         if (!rescatada) {
             guardar(m, EVENTO_TAREA_RECHAZADA, nodo_caido, p->tareas[i].id,
                     p->tareas[i].type == 'S' ? 3 : 1);
+            printf("Tarea %u rechazada al caer el nodo %d\n", p->tareas[i].id, nodo_caido);
+            p->nodo[i] = 0;
         }
     }
 }
 
-static void vigilar(SharedMemory *m, const Plan *p, const Config *c, int activos[2]) {
+static void vigilar(SharedMemory *m, Plan *p, const Config *c, int activos[2]) {
     uint64_t ahora = ipc_now_ms();
     // Cada reporte tiene N ticks y se toleran K reportes perdidos consecutivos.
     uint64_t max_ms = (uint64_t)c->tick_ms * c->reporte_cada * c->reportes_perdidos;
@@ -189,15 +197,24 @@ static void manual(SharedMemory *m, Plan *p, const Config *c, int activos[2], co
     }
     Task tarea = {(uint8_t)id, tipo, (uint32_t)w, (uint32_t)t, (uint32_t)d, (uint8_t)pr};
     int nodo = 0;
-    uint32_t sn[2] = {m->node_capacity[0], m->node_capacity[1]};
-    if (planner_admitir_manual(p, sn, tarea, &nodo) != 0 || nodo < 1 || nodo > 2 || !activos[nodo - 1]) {
+    // Un nodo caido se pasa con capacidad 0 para que no se elija
+    uint32_t sn[2] = {activos[0] ? m->node_capacity[0] : 0,
+                      activos[1] ? m->node_capacity[1] : 0};
+    if (planner_admitir_manual(p, sn, tarea, c->algoritmo, c->heuristica, &nodo) != 0 ||
+        nodo < 1 || nodo > 2 || !activos[nodo - 1]) {
         printf("No admitida: no supera la admision o el nodo no esta activo\n");
         guardar(m, EVENTO_TAREA_RECHAZADA, 0, tarea.id, 4);
         return;
     }
     if (pedir(m, nodo, CMD_DESPLEGAR, &tarea, c) != 0) {
         guardar(m, EVENTO_TAREA_RECHAZADA, nodo, tarea.id, 5);
+        int pos = plan_buscar(p, tarea.id);
+        if (pos >= 0) {
+            p->nodo[pos] = 0;
+        }
+        return;
     }
+    printf("Tarea %d admitida en el nodo %d\n", id, nodo);
 }
 
 int main(int argc, char **argv) {
@@ -258,7 +275,7 @@ int main(int argc, char **argv) {
     if (!terminar) {
         uint32_t sn[2] = {m->node_capacity[0], m->node_capacity[1]};
         if (planner_preparar(&config, sn, &plan) != 0) {
-            fprintf(stderr, "Error de tareas, asignaciones o planificador\n");
+            fprintf(stderr, "Error al leer el archivo de tareas\n");
             terminar = 1;
         }
     }
@@ -283,11 +300,20 @@ int main(int argc, char **argv) {
             terminar = 1;
         }
     }
+    // Despliegue segun el plan. Las tareas con nodo 0 no pasaron la
+    // admision en ningun nodo: se reportan como rechazadas y se sigue.
     for (int i = 0; i < plan.cantidad && !terminar; i++) {
+        if (plan.nodo[i] == 0) {
+            printf("Tarea %u rechazada: no pasa la admision en ningun nodo\n",
+                   plan.tareas[i].id);
+            guardar(m, EVENTO_TAREA_RECHAZADA, 0, plan.tareas[i].id, 6);
+            continue;
+        }
+        printf("Tarea %u -> nodo %d\n", plan.tareas[i].id, plan.nodo[i]);
         if (pedir(m, plan.nodo[i], CMD_DESPLEGAR, &plan.tareas[i], &config) != 0) {
             fprintf(stderr, "Error al desplegar tarea %u\n", plan.tareas[i].id);
             guardar(m, EVENTO_TAREA_RECHAZADA, plan.nodo[i], plan.tareas[i].id, 5);
-            terminar = 1;
+            plan.nodo[i] = 0;
         }
     }
     if (!terminar) {
