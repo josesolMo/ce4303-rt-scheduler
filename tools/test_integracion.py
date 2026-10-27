@@ -119,11 +119,10 @@ def main():
         conf = Path(tmp) / 'host.conf'
         reportes = Path(tmp) / 'output'
         conf.write_text('\n'.join([
-            'algoritmo=EDF', 'heuristica=FF', 'tick_ms=10', 'reporte_cada=5',
+            'algoritmo=EDF', 'heuristica=WF', 'tick_ms=10', 'reporte_cada=5',
             'reportes_perdidos=4',
             f'puerto_esp32={nodos[0].path}', f'puerto_pico={nodos[1].path}',
             'archivo_tareas=host/config/tasks_input.txt',
-            'archivo_asignaciones=host/config/asignaciones.csv',
             f'carpeta_reporte={reportes}', '',
         ]))
         p = subprocess.Popen(['./host_app', str(conf)], cwd=ROOT,

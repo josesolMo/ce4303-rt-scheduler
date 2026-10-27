@@ -32,6 +32,7 @@ static const char *motivo_rechazo(int codigo) {
         case 3: return "esporadica no reubicable";
         case 4: return "tarea manual no admitida o sin nodo activo";
         case 5: return "fallo de ACK en despliegue";
+        case 6: return "no pasa la admision en ningun nodo";
         default: return "";
     }
 }

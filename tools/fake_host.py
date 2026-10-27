@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Host falso corregido para probar un nodo por serial, sin el host real.
+Host falso para probar un nodo por serial, sin el host real.
 
 Uso:
     python3 tools/fake_host.py [puerto] [tick_ms]
@@ -58,11 +58,6 @@ class Puerto:
     def __init__(self, ruta):
         self.fd = os.open(ruta, os.O_RDWR | os.O_NOCTTY)
         tty.setraw(self.fd)
-        # Fijar la misma velocidad que Serial.begin(115200) en el ESP32.
-        attrs = termios.tcgetattr(self.fd)
-        attrs[4] = termios.B115200  # velocidad de entrada
-        attrs[5] = termios.B115200  # velocidad de salida
-        termios.tcsetattr(self.fd, termios.TCSANOW, attrs)
         termios.tcflush(self.fd, termios.TCIOFLUSH)
         self.buf = b""
 
@@ -132,19 +127,14 @@ def main():
 
     print(f"-> CALIB_REQ (tick = {tick_ms * 1000} us)")
     p.enviar(0x01, u32(tick_ms * 1000))
-    # El nodo hace 20 rondas, cada una de duración tick_ms.
-    calib_wait = max(2.0, (20 * tick_ms / 1000.0) + 1.0)
-    r = p.leer_tramas(calib_wait)
+    r = p.leer_tramas(2)
     sn = next((int.from_bytes(d, "little") for t, d in r if t == 0x02), None)
     if sn is None:
         print("No llegó la calibración. ¿Está cargado el programa y cerrado screen?")
         return
 
-    # Buscar un lote aproximadamente cada segundo para que el Gantt también
-    # aparezca cuando se usan ticks visuales de 100 o 500 ms.
-    report_every = max(1, min(50, 1000 // max(1, tick_ms)))
-    print(f"-> NODE_CONFIG (reporte cada {report_every} ticks)")
-    p.enviar(0x10, report_every.to_bytes(2, "little"))
+    print("-> NODE_CONFIG (reporte cada 50 ticks)")
+    p.enviar(0x10, (50).to_bytes(2, "little"))
     p.leer_tramas(0.5)
 
     # Las mismas tareas de las pruebas anteriores, con W en UT reales
