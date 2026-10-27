@@ -1,6 +1,10 @@
 #ifndef RTS_ENGINE_H
 #define RTS_ENGINE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
 Calendarizador local (RMS / EDF) para el ESP32 y Raspberry Pi Pico
 
@@ -122,4 +126,8 @@ uint8_t rts_tick(rts_engine_t *e);
 // Paso 2 del tick: ejecuta el trabajo de la tarea elegida y avanza el tick
 void rts_run(rts_engine_t *e);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif // RTS_ENGINE_H
