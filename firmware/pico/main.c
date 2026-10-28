@@ -383,9 +383,10 @@ static void handle_deploy(const uint8_t *p, uint8_t len)
     }
 
     // El algoritmo se toma de la primera tarea. Las siguientes tienen
-    // que traer el mismo.
+    // que traer el mismo. Tambien vale si ya esta corriendo sin tareas
+    // (le llegan por modo manual o por reubicacion).
     rts_algo_t algo = (alg == ALG_RMS) ? RTS_RMS : RTS_EDF;
-    if (engine.count == 0 && !engine.running) {
+    if (engine.count == 0) {
         engine.algo = algo;
     } else if (engine.algo != algo) {
         send_nack(t.id);

@@ -28,6 +28,7 @@ static const int BUTTON_PIN = 22;  // botón entre GPIO22 y GND; INPUT_PULLUP
 
 static const uint32_t CALIB_MARGIN_PERCENT = 70;
 static const uint32_t CALIB_ROUNDS = 20;
+static const uint32_t CALIB_WINDOW_US = 10000; // duración máxima de cada medición
 static const uint32_t MISS_LED_US = 300000;
 static const uint32_t BUTTON_DEBOUNCE_MS = 50;
 static const uint32_t DEFAULT_REPORT_EVERY = 50;
@@ -170,19 +171,25 @@ static uint8_t wire_task_id(uint8_t id) {
 // -----------------------------------------------------------------------------
 // Calibración
 // -----------------------------------------------------------------------------
+// Cada medición dura como máximo CALIB_WINDOW_US y el resultado se escala al
+// tick completo. Así, con ticks largos (por ejemplo 500 ms para ver los LEDs)
+// la calibración no tarda más de lo que el host espera la respuesta.
 static uint32_t calibrate(uint32_t requested_tick_us) {
+  const uint32_t window_us = (requested_tick_us < CALIB_WINDOW_US) ? requested_tick_us
+                                                                   : CALIB_WINDOW_US;
   uint32_t worst = UINT32_MAX;
   for (uint32_t round = 0; round < CALIB_ROUNDS; ++round) {
     uint32_t count = 0;
     const int64_t start_us = esp_timer_get_time();
-    while ((uint64_t)(esp_timer_get_time() - start_us) < requested_tick_us) {
+    while ((uint64_t)(esp_timer_get_time() - start_us) < window_us) {
       unidad_trabajo();
       ++count;
     }
     if (count < worst) worst = count;
   }
-  const uint32_t calibrated_ut = (worst * CALIB_MARGIN_PERCENT) / 100U;
-  return (calibrated_ut == 0) ? 1 : calibrated_ut;
+  uint64_t scaled = (uint64_t)worst * requested_tick_us / window_us;
+  scaled = scaled * CALIB_MARGIN_PERCENT / 100U;
+  return (scaled == 0) ? 1 : (uint32_t)scaled;
 }
 
 // -----------------------------------------------------------------------------
@@ -238,10 +245,12 @@ static void on_event(const rts_event_t *ev, void *ctx) {
   (void)ctx;
   switch (ev->type) {
     case RTS_EV_RELEASE:
-      // 0x07 identifica liberación de la esporádica; 0x0A, periódicas.
-      queue_event(task_is_sporadic(ev->task_id) ? MSG_EVENT_SPORADIC_LOCAL
-                                                : MSG_EVENT_RELEASE_LOCAL,
-                  ev->tick, ev->task_id);
+      // 0x0A para toda liberación (el host cuenta liberaciones con este) y,
+      // si es la esporádica, además 0x07 (el host mide la latencia con este).
+      queue_event(MSG_EVENT_RELEASE_LOCAL, ev->tick, ev->task_id);
+      if (task_is_sporadic(ev->task_id)) {
+        queue_event(MSG_EVENT_SPORADIC_LOCAL, ev->tick, ev->task_id);
+      }
       break;
 
     case RTS_EV_COMPLETE:
@@ -365,7 +374,7 @@ static void stop_scheduler_timer(void) {
 // Protocolo del host: tareas se despliegan antes de START_SYNC.
 // -----------------------------------------------------------------------------
 static void handle_calib_req(const uint8_t *payload, uint8_t length) {
-  if (length != 4 || scheduler_running || (engine_initialized && engine.count > 0)) {
+  if (length != 4 || scheduler_running) {
     send_nack(0);
     return;
   }
@@ -376,8 +385,19 @@ static void handle_calib_req(const uint8_t *payload, uint8_t length) {
     return;
   }
 
+  leds_all_off();
+
   tick_us = requested_tick_us;
   ut_per_tick = calibrate(tick_us);
+
+  // Una calibración nueva empieza desde cero: se descartan las tareas de una
+  // ejecución anterior (el host las vuelve a desplegar). Así no hace falta
+  // reiniciar la placa entre ejecuciones del host. El motor queda listo
+  // aunque no lleguen tareas: un nodo sin tareas igual debe arrancar,
+  // porque después le pueden llegar por modo manual o por reubicación.
+  // El algoritmo se toma de la primera tarea que llegue.
+  rts_init(&engine, RTS_EDF, ut_per_tick, on_event, nullptr);
+  engine_initialized = true;
   miss_led_ticks = (MISS_LED_US + tick_us - 1U) / tick_us;
   if (miss_led_ticks == 0) miss_led_ticks = 1;
   calibrated = true;
@@ -401,7 +421,9 @@ static void handle_node_config(const uint8_t *payload, uint8_t length) {
 
 static void handle_task_deploy(const uint8_t *payload, uint8_t length) {
   const uint8_t id = (length >= 2) ? payload[1] : 0;
-  if (!calibrated || scheduler_running || length != 16) {
+  // Se aceptan tareas también con el calendarizador corriendo: las usan el
+  // modo manual (3.5) y la reubicación cuando se cae el otro nodo (3.8).
+  if (!calibrated || length != 16) {
     send_nack(id);
     return;
   }
@@ -423,9 +445,9 @@ static void handle_task_deploy(const uint8_t *payload, uint8_t length) {
   }
 
   const rts_algo_t rts_algorithm = (algorithm == ALG_RMS) ? RTS_RMS : RTS_EDF;
-  if (!engine_initialized) {
-    rts_init(&engine, rts_algorithm, ut_per_tick, on_event, nullptr);
-    engine_initialized = true;
+  if (engine.count == 0) {
+    // Primera tarea del nodo: define el algoritmo
+    engine.algo = rts_algorithm;
   } else if (engine.algo != rts_algorithm) {
     // Todas las tareas de un mismo nodo deben utilizar el algoritmo desplegado.
     send_nack(task_id);
@@ -460,8 +482,8 @@ static bool trigger_sporadic_id(uint8_t requested_id) {
 }
 
 static void handle_start_sync(uint8_t length) {
-  if (length != 0 || !calibrated || !engine_initialized ||
-      engine.count == 0 || scheduler_running) {
+  // Se acepta aunque el nodo no tenga tareas (ver handle_calib_req)
+  if (length != 0 || !calibrated || !engine_initialized || scheduler_running) {
     send_nack(0);
     return;
   }
@@ -666,6 +688,9 @@ static void process_pending_ticks(void) {
 }
 
 void setup(void) {
+  // Búfer de salida grande: Serial.write() copia ahí y retorna sin esperar a
+  // que salgan los bytes, así el envío no atrasa el tick (seccion 3.6).
+  Serial.setTxBufferSize(1024);
   Serial.begin(115200);
   leds_init();
   pinMode(BUTTON_PIN, INPUT_PULLUP);

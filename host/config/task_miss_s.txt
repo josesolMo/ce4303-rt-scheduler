@@ -1,0 +1,14 @@
+# Carga para ver un plazo perdido al presionar el boton.
+# Formato: id,tipo,W,T,D,criticidad
+#
+# Las esporadicas 3 y 4 tienen plazo D = 1 tick, pero cuestan 2 ticks en la
+# Pico (170/87) y 5 en el ESP32 (170/42). La prueba de admision del enunciado
+# solo mira C/T (asume D = T), asi que las acepta. Al presionar el boton se
+# libera el trabajo, no alcanza a terminar en 1 tick y se pierde el plazo:
+# se prende el LED rojo y el host lo registra como DEADLINE_PERDIDO.
+# Hay una esporadica por nodo, asi funciona con el boton de cada placa.
+# Las periodicas 1 y 2 son livianas y nunca pierden plazos.
+1,P,170,10,10,2
+2,P,150,20,20,1
+3,S,170,50,1,3
+4,S,170,60,1,3

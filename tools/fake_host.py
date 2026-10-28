@@ -3,11 +3,17 @@
 Host falso para probar un nodo por serial, sin el host real.
 
 Uso:
-    python3 tools/fake_host.py [puerto] [tick_ms]
+    python3 tools/fake_host.py [puerto] [tick_ms] [RMS|EDF]
 
     puerto   por defecto /dev/ttyACM0
     tick_ms  duración del tick, por defecto 10. Con 500 se alcanzan a
              ver los LEDs.
+    RMS|EDF  algoritmo, por defecto EDF. Las tareas T1 (2 ticks cada 5) y
+             T2 (4 ticks cada 7) suman U = 0.97: cumplen con EDF pero pasan
+             el limite de RMS (0.83), asi que con RMS T2 pierde plazos.
+             El host real nunca le mandaria esta carga a un nodo con RMS
+             (la admision la rechaza); aqui se manda directo para ver la
+             diferencia en ejecucion.
 
 Después del START hay 8 segundos para presionar el botón físico.
 
@@ -58,6 +64,14 @@ class Puerto:
     def __init__(self, ruta):
         self.fd = os.open(ruta, os.O_RDWR | os.O_NOCTTY)
         tty.setraw(self.fd)
+        # 115200 baudios: lo usa el ESP32 (convertidor USB-serial). A la Pico
+        # no le afecta porque su USB es nativo.
+        attrs = termios.tcgetattr(self.fd)
+        attrs[4] = attrs[5] = termios.B115200
+        termios.tcsetattr(self.fd, termios.TCSANOW, attrs)
+        # Algunas placas ESP32 se reinician al abrir el puerto: se espera a
+        # que arranquen y se descarta lo que hayan impreso al iniciar.
+        time.sleep(1.5)
         termios.tcflush(self.fd, termios.TCIOFLUSH)
         self.buf = b""
 
@@ -120,8 +134,13 @@ def mostrar(tipo, datos):
 def main():
     ruta = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyACM0"
     tick_ms = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+    alg = sys.argv[3].upper() if len(sys.argv) > 3 else "EDF"
+    if alg not in ("RMS", "EDF"):
+        print("El algoritmo debe ser RMS o EDF")
+        return
     p = Puerto(ruta)
-    EDF = 1
+    ALG = 1 if alg == "EDF" else 0   # valor que va en el despliegue (wire_format.h)
+    print(f"Algoritmo: {alg}")
     # Con ticks lentos hay pocos eventos y se pueden imprimir todos
     resumen = tick_ms < 100
 
@@ -139,10 +158,10 @@ def main():
 
     # Las mismas tareas de las pruebas anteriores, con W en UT reales
     tareas = [
-        tarea(EDF, 1, "P", 2 * sn, 5, 5, 1),
-        tarea(EDF, 2, "P", 4 * sn, 7, 7, 1),
-        tarea(EDF, 3, "S", 2 * sn, 10, 10, 2),
-        tarea(EDF, 1, "P", 10, 5, 5, 1),   # id repetido: debe dar NACK
+        tarea(ALG, 1, "P", 2 * sn, 5, 5, 1),
+        tarea(ALG, 2, "P", 4 * sn, 7, 7, 1),
+        tarea(ALG, 3, "S", 2 * sn, 10, 10, 2),
+        tarea(ALG, 1, "P", 10, 5, 5, 1),   # id repetido: debe dar NACK
     ]
     for t in tareas:
         print(f"-> TASK_DEPLOY id {t[1]}")

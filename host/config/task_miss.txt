@@ -1,0 +1,17 @@
+# Carga para mostrar rechazos y entradas invalidas.
+# Formato: id,tipo,W,T,D,criticidad
+#
+# - La tarea 4 no cabe en ningun nodo (en la Pico cuesta 11 ticks cada 5,
+#   U = 2.2): se rechaza con el motivo "no pasa la admision en ningun nodo".
+# - Hay tres esporadicas (5, 6 y 7) y cada nodo admite solo una: la tercera
+#   se rechaza.
+# - La linea "8,X,..." tiene un tipo invalido: el host la informa y la salta.
+# El resto se asigna normal.
+1,P,170,10,10,3
+2,P,150,20,20,2
+3,P,80,10,10,1
+4,P,900,5,5,9
+5,S,80,20,20,2
+6,S,80,25,25,2
+7,S,80,30,30,2
+8,X,100,10,10,1
