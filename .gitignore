@@ -47,7 +47,8 @@ build-*/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
-Makefile
+# (Los Makefile que genera CMake quedan dentro de build/, que ya se ignora.
+#  El Makefile de la raiz SI se sube.)
 install_manifest.txt
 compile_commands.json
 
@@ -66,3 +67,15 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Embedded & RTOS
+.pio/
+.vscode/
+*.uf2
+
+# Programas compilados del proyecto
+/host_app
+/test_rts
+/test_planner
+/pc_node
+output/

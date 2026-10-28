@@ -1,0 +1,29 @@
+CE4303 - REPORTE DEL HOST
+
+Algoritmo: RMS
+Tick: 10 ms
+
+Nodo 1: capacidad 42 UT/tick
+Utilizacion teorica inicial: 0.8000 (2 tareas)
+Ticks recibidos para Gantt: 1460
+Cambios de tarea observados: 291
+Caidas reportadas: 0
+Utilizacion medida: 0.8021 (ticks completos desde cero)
+Tarea 3: ticks=587, liberaciones=98, finalizadas=97, deadlines=0, sporadicas=0, ignoradas=0
+Tarea 4: ticks=584, liberaciones=73, finalizadas=73, deadlines=0, sporadicas=0, ignoradas=0
+
+Nodo 2: capacidad 87 UT/tick
+Utilizacion teorica inicial: 0.7500 (4 tareas)
+Ticks recibidos para Gantt: 1461
+Cambios de tarea observados: 511
+Caidas reportadas: 0
+Utilizacion medida: 0.7002 (ticks completos desde cero)
+Tarea 1: ticks=585, liberaciones=147, finalizadas=146, deadlines=0, sporadicas=0, ignoradas=0
+Tarea 2: ticks=292, liberaciones=147, finalizadas=146, deadlines=0, sporadicas=0, ignoradas=0
+Tarea 7: ticks=146, liberaciones=74, finalizadas=73, deadlines=0, sporadicas=0, ignoradas=0
+
+Confirmaciones de despliegue: 6
+Tareas rechazadas registradas: 1
+Events perdidos por cola llena: 0
+Detalle de fallas y rechazos: eventos.csv
+IMPORTANTE: sin el registro completo de ejecucion enviado por firmware, el Gantt sera parcial.

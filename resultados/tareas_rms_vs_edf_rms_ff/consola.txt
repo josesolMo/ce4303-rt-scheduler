@@ -1,0 +1,20 @@
+Planificador host activo; la conformidad completa requiere validar firmware y hardware
+Puerto serial abierto: /dev/ttyACM0
+Puerto serial abierto: /dev/ttyUSB0
+Solicitud de calibracion enviada
+Capacidad recibida: 42 UT/tick
+Nodo 1: 42 UT/tick
+Solicitud de calibracion enviada
+Capacidad recibida: 87 UT/tick
+Nodo 2: 87 UT/tick
+Tarea 1 -> nodo 2
+Tarea 2 -> nodo 2
+Tarea 3 -> nodo 1
+Tarea 4 -> nodo 1
+Tarea 5 rechazada: no pasa la admision en ningun nodo
+Tarea 7 -> nodo 2
+Tarea 6 -> nodo 2
+Diferencia entre ACKs de START: 2 ms (no es desfase real de ticks)
+Host activo. q para salir; a ID P/S W T D criticidad + Enter para modo manual.
+Eventos descartados por cola llena: 0
+Fin del host. Revisa resultados/tareas_rms_vs_edf_rms_ff/
