@@ -8,7 +8,7 @@ hace la admisión y la asignación (**First-Fit** o **Worst-Fit**), vigila la ca
 de nodos y genera el reporte.
 
 La documentación completa (diseño, protocolo, experimentos y atributo de Trabajo
-en Equipo) está en [`doc/documentacion.pdf`](doc/documentacion.pdf).
+en Equipo) está en [`doc/Informe_Proyecto_SO.pdf`](doc/Informe_Proyecto_SO.pdf).
 
 **Integrantes:** Jose Pablo Fernández Rojas, Darío Garro Moya,
 Jarod David de la O Segura y José Andrés Solano Mora.
