@@ -74,6 +74,7 @@ class Puerto:
         time.sleep(1.5)
         termios.tcflush(self.fd, termios.TCIOFLUSH)
         self.buf = b""
+        self.gantt = []   # (tick, id) de cada EXEC_BATCH, para guardar en CSV
 
     def enviar(self, tipo, payload=b""):
         os.write(self.fd, trama(tipo, payload))
@@ -106,6 +107,10 @@ class Puerto:
                     continue
                 tipo, datos = fr[1], fr[3:-2]
                 recibidas.append((tipo, datos))
+                if tipo == 0x0C and len(datos) >= 5:
+                    t0 = int.from_bytes(datos[:4], "little")
+                    for i, x in enumerate(datos[5:5 + datos[4]]):
+                        self.gantt.append((t0 + i, x))
                 cuenta[tipo] = cuenta.get(tipo, 0) + 1
                 if not resumen or tipo in (0x0C, 0x08, 0x07, 0x0D, 0x04, 0xFF):
                     mostrar(tipo, datos)
@@ -183,6 +188,15 @@ def main():
     print("-> STOP_REQ (los LEDs se apagan)")
     p.enviar(0x09)
     p.leer_tramas(1, resumen=resumen)
+
+    # Guardar el Gantt con el mismo formato que el gantt.csv del host
+    os.makedirs("resultados", exist_ok=True)
+    ruta_csv = f"resultados/fake_host_{alg.lower()}_gantt.csv"
+    with open(ruta_csv, "w") as f:
+        f.write("nodo,tick,tarea\n")
+        for tick, tarea_id in p.gantt:
+            f.write(f"1,{tick},{tarea_id}\n")
+    print(f"Gantt guardado en {ruta_csv}")
 
     os.close(p.fd)
 

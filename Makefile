@@ -21,7 +21,7 @@ HOST_SRC = host/src/calibration.c host/src/driver.c host/src/gantt_svg.c \
 
 NODE_INC = -I common/include -I firmware/core
 
-.PHONY: all test clean
+.PHONY: all test clean run
 
 all: host_app
 
@@ -43,3 +43,11 @@ pc_node:
 
 clean:
 	rm -f host_app test_rts test_planner pc_node
+
+	# Ejecutar el host (compila primero si hace falta)
+# Uso: make run              -> usa host/config/host.conf
+#      make run CONF=otro.conf
+CONF ?= host/config/host.conf
+
+run: host_app
+	./host_app $(CONF)
